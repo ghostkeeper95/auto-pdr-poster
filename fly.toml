@@ -1,5 +1,5 @@
 app = 'auto-pdr-poster'
-primary_region = 'waw'
+primary_region = 'ams'
 
 [build]
 
