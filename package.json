@@ -9,7 +9,7 @@
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
-    "dev": "tsx src/index.ts",
+    "dev": "tsx src/bot.ts",
     "post": "QUESTIONS_PER_RUN=1 tsx src/index.ts",
     "post:5": "QUESTIONS_PER_RUN=5 tsx src/index.ts",
     "bot": "tsx src/bot.ts"

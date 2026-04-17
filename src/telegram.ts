@@ -11,6 +11,18 @@ interface TelegramResponse {
   result?: { message_id: number };
 }
 
+interface NewsTelegramPost {
+  title: string;
+  body: string;
+  url: string;
+  imageUrl?: string;
+  fallbackImageUrl?: string;
+  channelHandle?: string;
+  previewLabel?: string;
+  subscribeCta?: string;
+  replyMarkup?: { inline_keyboard: Array<Array<{ text: string; callback_data?: string; url?: string }>> };
+}
+
 interface GetChatResponse {
   ok: boolean;
   description?: string;
@@ -194,6 +206,126 @@ export async function sendTextMessage(
   }
 }
 
+function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+function convertEmphasis(text: string): string {
+  return text
+    .replace(/\*\*(.+?)\*\*/g, "<b>$1</b>")
+    .replace(/\*(.+?)\*/g, "<b>$1</b>");
+}
+
+export function getNewsCaptionBodyLimit(post: Pick<NewsTelegramPost, "title" | "url" | "previewLabel" | "subscribeCta">): number {
+  const sourceLink = `🔗 <a href="${post.url}">Джерело</a>`;
+  const subscribeLine = post.subscribeCta ? escapeHtml(post.subscribeCta) : undefined;
+  const suffix = [
+    "",
+    sourceLink,
+    subscribeLine ? "" : undefined,
+    subscribeLine,
+  ].filter((line) => line !== undefined).join("\n");
+
+  const header = [
+    post.previewLabel ? `<b>${escapeHtml(post.previewLabel)}</b>` : undefined,
+    `<b>${escapeHtml(post.title)}</b>`,
+    "",
+  ].filter((line) => line !== undefined).join("\n");
+
+  return Math.max(220, 1024 - header.length - suffix.length - 8);
+}
+
+function formatNewsCaption(post: NewsTelegramPost): string {
+  const bodyHtml = convertEmphasis(escapeHtml(post.body));
+  const sourceLink = `🔗 <a href="${post.url}">Джерело</a>`;
+  const subscribeLine = post.subscribeCta ? escapeHtml(post.subscribeCta) : undefined;
+
+  const suffix = [
+    "",
+    sourceLink,
+    subscribeLine ? "" : undefined,
+    subscribeLine,
+  ].filter((l) => l !== undefined).join("\n");
+
+  const header = [
+    post.previewLabel ? `<b>${escapeHtml(post.previewLabel)}</b>` : undefined,
+    `<b>${escapeHtml(post.title)}</b>`,
+    "",
+  ].filter((l) => l !== undefined).join("\n");
+
+  const maxBodyLength = getNewsCaptionBodyLimit(post);
+
+  let body = bodyHtml;
+  if (body.length > maxBodyLength) {
+    const lastNewline = body.lastIndexOf("\n", maxBodyLength);
+    const cutAt = lastNewline > maxBodyLength * 0.5 ? lastNewline : maxBodyLength;
+    body = `${body.slice(0, cutAt).trimEnd()}...`;
+  }
+
+  return [header, body, suffix].join("\n");
+}
+
+async function sendUploadedPhoto(
+  botToken: string,
+  chatId: string,
+  caption: string,
+  replyMarkup?: NewsTelegramPost["replyMarkup"],
+): Promise<void> {
+  const form = new FormData();
+  form.append("chat_id", chatId);
+  form.append("photo", new Blob([readFileSync(NO_IMAGE_PATH)], { type: "image/png" }), "no_image.png");
+  form.append("caption", caption);
+  form.append("parse_mode", "HTML");
+  if (replyMarkup) {
+    form.append("reply_markup", JSON.stringify(replyMarkup));
+  }
+
+  const response = await fetch(`${TELEGRAM_API}/bot${botToken}/sendPhoto`, {
+    method: "POST",
+    body: form,
+  });
+
+  const result = (await response.json()) as TelegramResponse;
+  if (!result.ok) {
+    throw new Error(`Telegram API error: ${result.description}`);
+  }
+}
+
+export async function sendNewsToTelegram(
+  botToken: string,
+  chatId: string,
+  post: NewsTelegramPost,
+): Promise<void> {
+  const caption = formatNewsCaption(post);
+  const candidateImages = [post.imageUrl, post.fallbackImageUrl].filter((value): value is string => Boolean(value));
+
+  for (const imageUrl of candidateImages) {
+    const response = await fetch(`${TELEGRAM_API}/bot${botToken}/sendPhoto`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        chat_id: chatId,
+        photo: imageUrl,
+        caption,
+        parse_mode: "HTML",
+        reply_markup: post.replyMarkup,
+      }),
+    });
+
+    const result = (await response.json()) as TelegramResponse;
+    if (result.ok) {
+      return;
+    }
+
+    console.warn(`Failed to send news photo (${imageUrl}): ${result.description}`);
+  }
+
+  await sendUploadedPhoto(botToken, chatId, caption, post.replyMarkup);
+}
+
 export async function sendExplanationComment(
   botToken: string,
   chatId: number | string,
@@ -202,10 +334,7 @@ export async function sendExplanationComment(
 ): Promise<void> {
   const url = `${TELEGRAM_API}/bot${botToken}/sendMessage`;
 
-  const escapedText = explanation
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
+  const escapedText = escapeHtml(explanation);
 
   const res = await fetch(url, {
     method: "POST",
