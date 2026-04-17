@@ -1,0 +1,22 @@
+app = 'auto-pdr-poster'
+primary_region = 'waw'
+
+[build]
+
+[env]
+  STATE_DIR = '/data'
+
+# No HTTP service — this is a worker (long-polling bot)
+[processes]
+  bot = 'node dist/bot.js'
+
+# Persistent volume for state.json
+[[mounts]]
+  source = 'pdr_data'
+  destination = '/data'
+
+# Single machine, no auto-scaling
+[[vm]]
+  size = 'shared-cpu-1x'
+  memory = 256
+  processes = ['bot']
