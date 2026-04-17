@@ -89,15 +89,85 @@ function parseDraftIdCommand(text: string, command: string): number | null {
   return Number(match[1]);
 }
 
+function formatSourceLabel(source: string): string {
+  switch (source) {
+    case "pdrtest":
+      return "PDRTest";
+    case "hsc":
+      return "ГСЦ МВС";
+    case "mmr":
+      return "MMR";
+    case "autogeek":
+      return "Autogeek";
+    default:
+      return source;
+  }
+}
+
+function parsePublishedAtValue(value: string): number {
+  const timestamp = Date.parse(value);
+  if (!Number.isNaN(timestamp)) {
+    return timestamp;
+  }
+
+  const monthMap: Record<string, number> = {
+    "січня": 0,
+    "лютого": 1,
+    "березня": 2,
+    "квітня": 3,
+    "травня": 4,
+    "червня": 5,
+    "липня": 6,
+    "серпня": 7,
+    "вересня": 8,
+    "жовтня": 9,
+    "листопада": 10,
+    "грудня": 11,
+  };
+
+  const normalized = value.toLowerCase().replace(/\s+/g, " ").trim();
+  const numericMatch = normalized.match(/(\d{1,2})\.(\d{1,2})\.(\d{4})(?:\s*,?\s*(\d{1,2}):(\d{2}))?/);
+  if (numericMatch) {
+    const [, dayRaw, monthRaw, yearRaw, hourRaw, minuteRaw] = numericMatch;
+    return new Date(
+      Number(yearRaw),
+      Number(monthRaw) - 1,
+      Number(dayRaw),
+      Number(hourRaw ?? 0),
+      Number(minuteRaw ?? 0),
+    ).getTime();
+  }
+
+  const match = normalized.match(/(\d{1,2})\s+([а-яіїєґ']+)\s+(\d{4})(?:\s*(?:,|о)?\s*(\d{1,2}):(\d{2}))?/i);
+  if (!match) {
+    return 0;
+  }
+
+  const [, dayRaw, monthRaw, yearRaw, hourRaw, minuteRaw] = match;
+  const monthIndex = monthMap[monthRaw];
+  if (monthIndex === undefined) {
+    return 0;
+  }
+
+  return new Date(
+    Number(yearRaw),
+    monthIndex,
+    Number(dayRaw),
+    Number(hourRaw ?? 0),
+    Number(minuteRaw ?? 0),
+  ).getTime();
+}
+
 function formatDraftList(): string {
-  const drafts = getNewsDrafts("draft");
+  const drafts = getNewsDrafts("draft")
+    .sort((left, right) => parsePublishedAtValue(right.publishedAt) - parsePublishedAtValue(left.publishedAt));
   if (drafts.length === 0) {
     return "Чернеток поки немає. Використовуй /news_find";
   }
 
   return [
     "🗂 Чернетки новин:",
-    ...drafts.slice(0, 10).map((draft) => `${draft.id}. ${draft.title} (${draft.publishedAt})`),
+    ...drafts.slice(0, 10).map((draft) => `${draft.id}. [${formatSourceLabel(draft.source)} | ${draft.publishedAt}] ${draft.title}`),
   ].join("\n");
 }
 
@@ -290,7 +360,7 @@ async function handleCommand(
           chatId,
           [
             `✅ Збережено ${saved.length} чернеток:`,
-            ...saved.map((draft) => `${draft.id}. ${draft.title}`),
+            ...saved.map((draft) => `${draft.id}. [${formatSourceLabel(draft.source)} | ${draft.publishedAt}] ${draft.title}`),
           ].join("\n"),
         );
       }

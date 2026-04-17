@@ -9,6 +9,21 @@ const MMR_BASE_URL = "https://mmr.net.ua";
 const AUTOGEEK_FEED_URL = "https://autogeek.com.ua/feed/";
 const AUTOGEEK_BASE_URL = "https://autogeek.com.ua";
 
+const UKRAINIAN_MONTHS: Record<string, number> = {
+  "січня": 0,
+  "лютого": 1,
+  "березня": 2,
+  "квітня": 3,
+  "травня": 4,
+  "червня": 5,
+  "липня": 6,
+  "серпня": 7,
+  "вересня": 8,
+  "жовтня": 9,
+  "листопада": 10,
+  "грудня": 11,
+};
+
 type NewsSource = "pdrtest" | "hsc" | "mmr" | "autogeek";
 
 interface RssSourceConfig {
@@ -83,27 +98,41 @@ function decodeXml(text: string): string {
 
 function parseDateValue(value: string): number {
   const timestamp = Date.parse(value);
-  return Number.isNaN(timestamp) ? 0 : timestamp;
+  if (!Number.isNaN(timestamp)) {
+    return timestamp;
+  }
+
+  const normalized = value.toLowerCase().replace(/\s+/g, " ").trim();
+  const ukrainianMatch = normalized.match(/(\d{1,2})\s+([а-яіїєґ']+)\s+(\d{4})(?:\s*(?:,|о)?\s*(\d{1,2}):(\d{2}))?/i);
+  if (ukrainianMatch) {
+    const [, dayRaw, monthRaw, yearRaw, hourRaw, minuteRaw] = ukrainianMatch;
+    const monthIndex = UKRAINIAN_MONTHS[monthRaw];
+    if (monthIndex !== undefined) {
+      const day = Number(dayRaw);
+      const year = Number(yearRaw);
+      const hour = Number(hourRaw ?? 0);
+      const minute = Number(minuteRaw ?? 0);
+      return new Date(year, monthIndex, day, hour, minute).getTime();
+    }
+  }
+
+  const numericMatch = normalized.match(/(\d{1,2})\.(\d{1,2})\.(\d{4})(?:\s*,?\s*(\d{1,2}):(\d{2}))?/);
+  if (numericMatch) {
+    const [, dayRaw, monthRaw, yearRaw, hourRaw, minuteRaw] = numericMatch;
+    return new Date(
+      Number(yearRaw),
+      Number(monthRaw) - 1,
+      Number(dayRaw),
+      Number(hourRaw ?? 0),
+      Number(minuteRaw ?? 0),
+    ).getTime();
+  }
+
+  return 0;
 }
 
 function sortByPublishedAt(items: NewsCandidate[]): NewsCandidate[] {
   return [...items].sort((left, right) => parseDateValue(right.publishedAt) - parseDateValue(left.publishedAt));
-}
-
-function interleaveNewsSources(groups: NewsCandidate[][], limit: number): NewsCandidate[] {
-  const queues = groups.map((group) => [...group]);
-  const merged: NewsCandidate[] = [];
-
-  while (merged.length < limit && queues.some((queue) => queue.length > 0)) {
-    for (const queue of queues) {
-      const item = queue.shift();
-      if (!item) continue;
-      merged.push(item);
-      if (merged.length >= limit) break;
-    }
-  }
-
-  return merged;
 }
 
 function extractArticleUrls(html: string, limit: number): string[] {
@@ -355,10 +384,10 @@ export async function fetchLatestPdrNews(limit: number): Promise<NewsCandidate[]
     }),
   );
 
-  return interleaveNewsSources([
-    sortByPublishedAt(pdrItems),
-    ...rssGroups.map((group) => sortByPublishedAt(group)),
-  ], limit);
+  return sortByPublishedAt([
+    ...pdrItems,
+    ...rssGroups.flat(),
+  ]).slice(0, limit);
 }
 
 export function formatNewsDraftPreview(title: string, excerpt: string, publishedAt: string, url: string): string {
