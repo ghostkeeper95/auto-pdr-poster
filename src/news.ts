@@ -2,12 +2,19 @@ import * as cheerio from "cheerio";
 
 const PDR_NEWS_URL = "https://pdrtest.com/news";
 const PDR_BASE_URL = "https://pdrtest.com";
+const UKRNET_AUTO_URL = "https://www.ukr.net/news/auto.html";
+const UKRNET_BASE_URL = "https://www.ukr.net";
 const HSC_FEED_URL = "https://hsc.gov.ua/feed/";
 const HSC_BASE_URL = "https://hsc.gov.ua";
 const MMR_FEED_URL = "https://mmr.net.ua/feed";
 const MMR_BASE_URL = "https://mmr.net.ua";
 const AUTOGEEK_FEED_URL = "https://autogeek.com.ua/feed/";
 const AUTOGEEK_BASE_URL = "https://autogeek.com.ua";
+
+const NEWS_REQUEST_HEADERS = {
+  "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36",
+  "Accept-Language": "uk,en-US;q=0.9,en;q=0.8",
+};
 
 const UKRAINIAN_MONTHS: Record<string, number> = {
   "січня": 0,
@@ -34,12 +41,19 @@ interface RssSourceConfig {
 }
 
 export interface NewsCandidate {
-  source: NewsSource;
+  source: string;
   title: string;
   excerpt: string;
   url: string;
   publishedAt: string;
   imageUrl?: string;
+}
+
+export interface NewsHeadline {
+  source: string;
+  title: string;
+  url: string;
+  publishedAt: string;
 }
 
 export function buildBrandedImageUrl(title: string): string {
@@ -80,6 +94,74 @@ function truncate(text: string, maxLength: number): string {
 
 function stripHtml(text: string): string {
   return normalizeWhitespace(text.replace(/<[^>]+>/g, " ").replace(/&#8230;|&hellip;/g, "..."));
+}
+
+function cleanSourceLabel(text: string): string {
+  return normalizeWhitespace(text).replace(/^\((.*)\)$/, "$1");
+}
+
+function normalizeArticleTitle(text: string): string {
+  return normalizeWhitespace(text)
+    .replace(/\s+[|–-]\s+(новини|ua\s?motors|uamotors|autogeek|mmr|автоцентр|oboz\.ua|фокус).*$/i, "")
+    .trim();
+}
+
+function isUsefulArticleParagraph(text: string): boolean {
+  if (text.length < 45) return false;
+
+  return ![
+    /^фото:/i,
+    /^відео:/i,
+    /^колаж:/i,
+    /^джерело:/i,
+    /^читайте також/i,
+    /^підписуй/i,
+    /^реклама/i,
+    /^матеріали з позначками/i,
+    /^наш seo-партнер/i,
+    /^mmr\.net\.ua/i,
+    /^©/i,
+  ].some((pattern) => pattern.test(text));
+}
+
+function collectParagraphs($: cheerio.CheerioAPI, selectors: string[]): string[] {
+  const unique = new Set<string>();
+
+  for (const selector of selectors) {
+    const paragraphs = $(selector)
+      .map((_i, el) => normalizeWhitespace($(el).text()))
+      .get()
+      .filter(isUsefulArticleParagraph);
+
+    if (paragraphs.length >= 2) {
+      const result: string[] = [];
+      for (const paragraph of paragraphs) {
+        if (unique.has(paragraph)) continue;
+        unique.add(paragraph);
+        result.push(paragraph);
+      }
+      return result;
+    }
+  }
+
+  return [];
+}
+
+function formatCurrentDatePrefix(): string {
+  const now = new Date();
+  const day = String(now.getDate()).padStart(2, "0");
+  const month = String(now.getMonth() + 1).padStart(2, "0");
+  const year = String(now.getFullYear());
+  return `${day}.${month}.${year}`;
+}
+
+async function fetchNewsPage(url: string): Promise<string> {
+  const response = await fetch(url, { headers: NEWS_REQUEST_HEADERS });
+  if (!response.ok) {
+    throw new Error(`Failed to fetch ${url}: ${response.status}`);
+  }
+
+  return response.text();
 }
 
 function decodeXml(text: string): string {
@@ -187,13 +269,14 @@ function extractImageUrl($: cheerio.CheerioAPI, articleUrl: string, baseUrl: str
 }
 
 async function fetchNewsCandidate(url: string): Promise<NewsCandidate | undefined> {
-  const response = await fetch(url);
-  if (!response.ok) {
-    console.warn(`Failed to fetch news article ${url}: ${response.status}`);
+  let html: string;
+  try {
+    html = await fetchNewsPage(url);
+  } catch (error) {
+    console.warn(`Failed to fetch news article ${url}:`, error);
     return undefined;
   }
 
-  const html = await response.text();
   const $ = cheerio.load(html);
   const title = normalizeWhitespace($("h1").first().text());
   const pageText = normalizeWhitespace($.root().text());
@@ -211,6 +294,110 @@ async function fetchNewsCandidate(url: string): Promise<NewsCandidate | undefine
     publishedAt: extractPublishedAt(pageText),
     imageUrl: extractImageUrl($, url, PDR_BASE_URL),
   };
+}
+
+function extractGenericExcerpt($: cheerio.CheerioAPI): string {
+  const bodyParagraphs = collectParagraphs($, [
+    ".article__content p",
+    ".entry-content p",
+    ".post-content p",
+    ".article-content p",
+    ".article p",
+    "article p",
+    ".news-text p",
+    "main article p",
+    "main p",
+    "p",
+  ]);
+  if (bodyParagraphs.length > 0) {
+    return truncate(bodyParagraphs.slice(0, 6).join("\n\n"), 4000);
+  }
+
+  const metaDescription = normalizeWhitespace(
+    $("meta[property='og:description']").attr("content")
+    || $("meta[name='description']").attr("content")
+    || "",
+  );
+  if (metaDescription.length >= 80) {
+    return truncate(metaDescription, 4000);
+  }
+
+  return "";
+}
+
+export async function fetchLatestNewsHeadlines(limit: number): Promise<NewsHeadline[]> {
+  const html = await fetchNewsPage(UKRNET_AUTO_URL);
+  const $ = cheerio.load(html);
+  const currentDatePrefix = formatCurrentDatePrefix();
+  const seen = new Set<string>();
+  const items: NewsHeadline[] = [];
+
+  $("section.im").each((_index, element) => {
+    if (items.length >= limit) {
+      return false;
+    }
+
+    const section = $(element);
+    const link = section.find("a.im-tl_a").first();
+    const sourceLink = section.find("a.im-pr_a").first();
+    const title = normalizeWhitespace(link.text());
+    const href = link.attr("href");
+    const source = cleanSourceLabel(sourceLink.text()) || "Ukr.net";
+    const publishedTime = normalizeWhitespace(section.find("time.im-tm").first().text());
+    const publishedAt = /^\d{1,2}:\d{2}$/.test(publishedTime)
+      ? `${currentDatePrefix}, ${publishedTime}`
+      : publishedTime || "Невідомий час";
+
+    if (!title || !href) {
+      return;
+    }
+
+    const url = new URL(href, UKRNET_BASE_URL).toString();
+    if (seen.has(url)) {
+      return;
+    }
+
+    seen.add(url);
+    items.push({
+      source,
+      title,
+      url,
+      publishedAt,
+    });
+  });
+
+  return items;
+}
+
+export async function fetchNewsDraftFromHeadline(headline: NewsHeadline): Promise<NewsCandidate | undefined> {
+  try {
+    const html = await fetchNewsPage(headline.url);
+    const $ = cheerio.load(html);
+    const pageTitle = normalizeArticleTitle(
+      $("h1").first().text()
+      || $("meta[property='og:title']").attr("content")
+      || headline.title,
+    );
+    const excerpt = extractGenericExcerpt($);
+    const imageBaseUrl = new URL(headline.url).origin;
+    const imageUrl = extractImageUrl($, headline.url, imageBaseUrl);
+
+    if (!pageTitle || !excerpt) {
+      return undefined;
+    }
+
+    return {
+      source: headline.source,
+      title: pageTitle,
+      excerpt,
+      url: headline.url,
+      publishedAt: headline.publishedAt,
+      imageUrl,
+    };
+  } catch (error) {
+    console.warn(`Failed to build draft from headline ${headline.url}:`, error);
+    return undefined;
+  }
 }
 
 interface FeedEntry {

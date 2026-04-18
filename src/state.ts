@@ -20,16 +20,34 @@ export interface NewsDraft {
   status: "draft" | "posted" | "rejected";
 }
 
+export interface PendingNewsHeadline {
+  id: number;
+  source: string;
+  title: string;
+  url: string;
+  publishedAt: string;
+  createdAt: string;
+}
+
 interface State {
   postedIds: string[];
   lastSection: number;
   lastQuestionIndex: number;
   newsDrafts: NewsDraft[];
+  pendingNewsHeadlines: PendingNewsHeadline[];
+  nextPendingNewsId: number;
 }
 
 function loadState(): State {
   if (!existsSync(STATE_PATH)) {
-    return { postedIds: [], lastSection: 1, lastQuestionIndex: 0, newsDrafts: [] };
+    return {
+      postedIds: [],
+      lastSection: 1,
+      lastQuestionIndex: 0,
+      newsDrafts: [],
+      pendingNewsHeadlines: [],
+      nextPendingNewsId: 1,
+    };
   }
 
   const raw = readFileSync(STATE_PATH, "utf-8");
@@ -40,6 +58,8 @@ function loadState(): State {
     lastSection: parsed.lastSection ?? 1,
     lastQuestionIndex: parsed.lastQuestionIndex ?? 0,
     newsDrafts: parsed.newsDrafts ?? [],
+    pendingNewsHeadlines: parsed.pendingNewsHeadlines ?? [],
+    nextPendingNewsId: parsed.nextPendingNewsId ?? 1,
   };
 }
 
@@ -110,6 +130,11 @@ export function getNewsDrafts(status: NewsDraft["status"] = "draft"): NewsDraft[
   return state.newsDrafts.filter((draft) => draft.status === status);
 }
 
+export function getAllNewsDrafts(): NewsDraft[] {
+  const state = loadState();
+  return state.newsDrafts;
+}
+
 export function getNewsDraftById(id: number): NewsDraft | undefined {
   const state = loadState();
   return state.newsDrafts.find((draft) => draft.id === id);
@@ -130,4 +155,71 @@ export function updateNewsDraft(id: number, updates: Partial<Pick<NewsDraft, "re
   if (!draft) return;
   Object.assign(draft, updates);
   saveState(state);
+}
+
+export function refreshNewsDraft(
+  id: number,
+  updates: Partial<Pick<NewsDraft, "title" | "excerpt" | "publishedAt" | "imageUrl" | "renderedBody" | "stockImageUrl">>,
+): NewsDraft | undefined {
+  const state = loadState();
+  const draft = state.newsDrafts.find((item) => item.id === id);
+  if (!draft) return undefined;
+
+  if (Object.prototype.hasOwnProperty.call(updates, "title") && updates.title !== undefined) {
+    draft.title = updates.title;
+  }
+
+  if (Object.prototype.hasOwnProperty.call(updates, "excerpt") && updates.excerpt !== undefined) {
+    draft.excerpt = updates.excerpt;
+  }
+
+  if (Object.prototype.hasOwnProperty.call(updates, "publishedAt") && updates.publishedAt !== undefined) {
+    draft.publishedAt = updates.publishedAt;
+  }
+
+  if (Object.prototype.hasOwnProperty.call(updates, "imageUrl")) {
+    draft.imageUrl = updates.imageUrl;
+  }
+
+  if (Object.prototype.hasOwnProperty.call(updates, "renderedBody")) {
+    draft.renderedBody = updates.renderedBody;
+  }
+
+  if (Object.prototype.hasOwnProperty.call(updates, "stockImageUrl")) {
+    draft.stockImageUrl = updates.stockImageUrl;
+  }
+
+  saveState(state);
+  return draft;
+}
+
+export function replacePendingNewsHeadlines(
+  headlines: Array<Omit<PendingNewsHeadline, "id" | "createdAt">>,
+): PendingNewsHeadline[] {
+  const state = loadState();
+  const createdAt = new Date().toISOString();
+  const created = headlines.map((headline, index) => ({
+    ...headline,
+    id: state.nextPendingNewsId + index,
+    createdAt,
+  }));
+
+  state.pendingNewsHeadlines = created;
+  state.nextPendingNewsId += created.length;
+  saveState(state);
+  return created;
+}
+
+export function getPendingNewsHeadlineById(id: number): PendingNewsHeadline | undefined {
+  const state = loadState();
+  return state.pendingNewsHeadlines.find((headline) => headline.id === id);
+}
+
+export function removePendingNewsHeadline(id: number): PendingNewsHeadline | undefined {
+  const state = loadState();
+  const index = state.pendingNewsHeadlines.findIndex((headline) => headline.id === id);
+  if (index === -1) return undefined;
+  const [removed] = state.pendingNewsHeadlines.splice(index, 1);
+  saveState(state);
+  return removed;
 }

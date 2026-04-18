@@ -88,7 +88,7 @@ export async function postQuestions(count: number, externalOffset?: number): Pro
 
           if (explanation) {
             let explanationText = explanation;
-            if (aiApiKey) {
+            if (aiApiKey || process.env.OPENROUTER_API_KEY) {
               explanationText = await summarizeExplanation(
                 aiApiKey,
                 explanationText,

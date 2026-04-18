@@ -2,8 +2,8 @@ import "dotenv/config";
 import { extractImageKeywords, formatNewsPost, shortenNewsPost } from "./ai.js";
 import { searchStockImage } from "./images.js";
 import { postQuestions } from "./index.js";
-import { buildBrandedImageUrl, fetchLatestPdrNews, resolveNewsImageUrl } from "./news.js";
-import { getNewsDraftById, getNewsDrafts, saveNewsDrafts, updateNewsDraft, updateNewsDraftStatus } from "./state.js";
+import { buildBrandedImageUrl, fetchLatestNewsHeadlines, fetchNewsDraftFromHeadline, resolveNewsImageUrl } from "./news.js";
+import { getAllNewsDrafts, getNewsDraftById, getNewsDrafts, getPendingNewsHeadlineById, refreshNewsDraft, removePendingNewsHeadline, replacePendingNewsHeadlines, saveNewsDrafts, updateNewsDraft, updateNewsDraftStatus } from "./state.js";
 import { getNewsCaptionBodyLimit, sendNewsToTelegram } from "./telegram.js";
 
 const TELEGRAM_API = "https://api.telegram.org";
@@ -39,11 +39,21 @@ function getAdminIds(): Set<number> {
   );
 }
 
-async function sendMessage(botToken: string, chatId: number, text: string): Promise<void> {
+async function sendMessage(
+  botToken: string,
+  chatId: number,
+  text: string,
+  options?: { replyMarkup?: unknown; disableWebPagePreview?: boolean },
+): Promise<void> {
   await fetch(`${TELEGRAM_API}/bot${botToken}/sendMessage`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ chat_id: chatId, text }),
+    body: JSON.stringify({
+      chat_id: chatId,
+      text,
+      disable_web_page_preview: options?.disableWebPagePreview,
+      reply_markup: options?.replyMarkup,
+    }),
   });
 }
 
@@ -80,7 +90,7 @@ function parsePostCommand(text: string): number | null {
 function parseNewsFindCommand(text: string): number | null {
   const match = text.match(/^\/news_find(?:@\w+)?(?:\s+(\d+))?$/);
   if (!match) return null;
-  return Math.min(Number(match[1] ?? 10), 10);
+  return Math.min(Number(match[1] ?? 10), 20);
 }
 
 function parseDraftIdCommand(text: string, command: string): number | null {
@@ -126,6 +136,14 @@ function parsePublishedAtValue(value: string): number {
   };
 
   const normalized = value.toLowerCase().replace(/\s+/g, " ").trim();
+  const timeOnlyMatch = normalized.match(/^(\d{1,2}):(\d{2})$/);
+  if (timeOnlyMatch) {
+    const [, hourRaw, minuteRaw] = timeOnlyMatch;
+    const now = new Date();
+    now.setHours(Number(hourRaw), Number(minuteRaw), 0, 0);
+    return now.getTime();
+  }
+
   const numericMatch = normalized.match(/(\d{1,2})\.(\d{1,2})\.(\d{4})(?:\s*,?\s*(\d{1,2}):(\d{2}))?/);
   if (numericMatch) {
     const [, dayRaw, monthRaw, yearRaw, hourRaw, minuteRaw] = numericMatch;
@@ -158,9 +176,19 @@ function parsePublishedAtValue(value: string): number {
   ).getTime();
 }
 
+function getDraftSortValue(draft: { publishedAt: string; createdAt: string }): number {
+  const publishedAt = parsePublishedAtValue(draft.publishedAt);
+  if (publishedAt > 0) {
+    return publishedAt;
+  }
+
+  const createdAt = Date.parse(draft.createdAt);
+  return Number.isNaN(createdAt) ? 0 : createdAt;
+}
+
 function formatDraftList(): string {
   const drafts = getNewsDrafts("draft")
-    .sort((left, right) => parsePublishedAtValue(right.publishedAt) - parsePublishedAtValue(left.publishedAt));
+    .sort((left, right) => getDraftSortValue(right) - getDraftSortValue(left));
   if (drafts.length === 0) {
     return "Чернеток поки немає. Використовуй /news_find";
   }
@@ -191,6 +219,20 @@ function buildPublishReplyMarkup(draftId: number) {
   };
 }
 
+function buildHeadlineReplyMarkup(headlineId: number, url: string) {
+  return {
+    inline_keyboard: [
+      [
+        { text: "Відкрити", url },
+        { text: "Зберегти в draft", callback_data: `save_headline:${headlineId}` },
+      ],
+      [
+        { text: "Пропустити", callback_data: `skip_headline:${headlineId}` },
+      ],
+    ],
+  };
+}
+
 function parseDraftAction(data: string | undefined, action: string): number | null {
   if (!data) return null;
   const match = data.match(new RegExp(`^${action}:(\\d+)$`));
@@ -208,7 +250,8 @@ async function ensureRenderedBody(
   if (draft?.renderedBody) return draft.renderedBody;
 
   const aiApiKey = process.env.GEMINI_API_KEY;
-  if (!aiApiKey) {
+  const hasAiProvider = Boolean(aiApiKey || process.env.OPENROUTER_API_KEY);
+  if (!hasAiProvider) {
     updateNewsDraft(draftId, { renderedBody: excerpt });
     return excerpt;
   }
@@ -235,7 +278,8 @@ async function ensureStockImage(draftId: number, title: string): Promise<string 
 
   const pexelsKey = process.env.PEXELS_API_KEY;
   const geminiKey = process.env.GEMINI_API_KEY;
-  if (!pexelsKey || !geminiKey) return undefined;
+  const hasAiProvider = Boolean(geminiKey || process.env.OPENROUTER_API_KEY);
+  if (!pexelsKey || !hasAiProvider) return undefined;
 
   const keywords = await extractImageKeywords(geminiKey, title);
   console.log(`Image keywords for draft ${draftId}: ${keywords}`);
@@ -289,6 +333,57 @@ async function publishDraft(botToken: string, draftId: number): Promise<string> 
   return `✅ Чернетку ${draftId} опубліковано.`;
 }
 
+async function saveHeadlineAsDraft(headlineId: number): Promise<string> {
+  const headline = getPendingNewsHeadlineById(headlineId);
+  if (!headline) {
+    throw new Error("Цей заголовок уже неактуальний. Запусти /news_find ще раз.");
+  }
+
+  const item = await fetchNewsDraftFromHeadline(headline);
+  if (!item) {
+    throw new Error("Не вдалося витягнути текст статті для чернетки.");
+  }
+
+  const saved = saveNewsDrafts([item]);
+  removePendingNewsHeadline(headlineId);
+
+  if (saved.length === 0) {
+    return "Ця стаття вже є в чернетках або вже оброблялася раніше.";
+  }
+
+  const draft = saved[0];
+  return `✅ Збережено в чернетки: ${draft.id}. [${formatSourceLabel(draft.source)} | ${draft.publishedAt}] ${draft.title}`;
+}
+
+async function refreshDraftPreviewCache(draftId: number): Promise<string> {
+  const draft = getNewsDraftById(draftId);
+  if (!draft) {
+    throw new Error("Чернетку не знайдено.");
+  }
+
+  const refreshed = await fetchNewsDraftFromHeadline({
+    source: draft.source,
+    title: draft.title,
+    url: draft.url,
+    publishedAt: draft.publishedAt,
+  });
+
+  if (!refreshed) {
+    throw new Error("Не вдалося оновити матеріал із джерела.");
+  }
+
+  refreshNewsDraft(draftId, {
+    title: refreshed.title,
+    excerpt: refreshed.excerpt,
+    publishedAt: refreshed.publishedAt,
+    imageUrl: refreshed.imageUrl,
+    renderedBody: undefined,
+    stockImageUrl: undefined,
+  });
+
+  return `♻️ Чернетку ${draftId} оновлено з джерела. Тепер /draft ${draftId} згенерує нове прев'ю.`;
+}
+
 function isCommand(text: string): boolean {
   return text.startsWith("/");
 }
@@ -329,9 +424,10 @@ async function handleCommand(
         "PDR Auto Poster Bot 🚗",
         "",
         "/post [N] - запостити тести",
-        "/news_find [N] - знайти новини і зберегти в чернетки",
+        "/news_find [N] - показати заголовки новин для відбору",
         "/drafts - список чернеток",
         "/draft ID - перегляд чернетки",
+        "/draft_refresh ID - оновити чернетку з джерела і скинути кеш прев'ю",
         "/draft_post ID - опублікувати чернетку",
         "/draft_reject ID - відхилити чернетку",
       ].join("\n"),
@@ -346,23 +442,44 @@ async function handleCommand(
 
   const newsLimit = parseNewsFindCommand(text);
   if (newsLimit !== null) {
-    await sendMessage(botToken, chatId, `🔎 Шукаю до ${newsLimit} новин...`);
+    await sendMessage(botToken, chatId, `🔎 Забираю до ${newsLimit} заголовків з Ukr.net...`);
 
     try {
-      const items = await fetchLatestPdrNews(newsLimit);
-      const saved = saveNewsDrafts(items);
+      const knownUrls = new Set(getAllNewsDrafts().map((draft) => draft.url));
+      const items = await fetchLatestNewsHeadlines(newsLimit * 2);
+      const pending = replacePendingNewsHeadlines(
+        items
+          .filter((item) => !knownUrls.has(item.url))
+          .slice(0, newsLimit),
+      );
 
-      if (saved.length === 0) {
-        await sendMessage(botToken, chatId, "Нових чернеток не знайшов. Можливо, все вже збережено.");
+      if (pending.length === 0) {
+        await sendMessage(botToken, chatId, "Нічого нового для відбору не знайшов. Можливо, ти вже все цінне забрав у draft.");
       } else {
         await sendMessage(
           botToken,
           chatId,
           [
-            `✅ Збережено ${saved.length} чернеток:`,
-            ...saved.map((draft) => `${draft.id}. [${formatSourceLabel(draft.source)} | ${draft.publishedAt}] ${draft.title}`),
+            `Знайшов ${pending.length} кандидатів.`,
+            "Тисни `Відкрити`, швидко оцінюй, і зберігай тільки те, що реально хочеш відкласти в draft.",
+            "Усе, що не забереш, при наступному /news_find буде замінене новим списком.",
           ].join("\n"),
         );
+
+        for (const [index, headline] of pending.entries()) {
+          await sendMessage(
+            botToken,
+            chatId,
+            [
+              `${index + 1}. [${formatSourceLabel(headline.source)} | ${headline.publishedAt}] ${headline.title}`,
+              headline.url,
+            ].join("\n"),
+            {
+              replyMarkup: buildHeadlineReplyMarkup(headline.id, headline.url),
+              disableWebPagePreview: true,
+            },
+          );
+        }
       }
     } catch (err) {
       console.error("News fetch error:", err);
@@ -400,6 +517,18 @@ async function handleCommand(
       subscribeCta,
       replyMarkup: buildPublishReplyMarkup(previewDraftId),
     });
+    return offset;
+  }
+
+  const refreshDraftId = parseDraftIdCommand(text, "draft_refresh");
+  if (refreshDraftId !== null) {
+    try {
+      await sendMessage(botToken, chatId, "⏳ Оновлюю чернетку з джерела і скидаю кеш прев'ю...");
+      await sendMessage(botToken, chatId, await refreshDraftPreviewCache(refreshDraftId));
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : "Помилка оновлення чернетки.";
+      await sendMessage(botToken, chatId, `❌ ${errorMessage}`);
+    }
     return offset;
   }
 
@@ -480,6 +609,31 @@ async function handleCallbackQuery(
         await sendMessage(botToken, chatId, `❌ ${errorMessage}`);
       }
     }
+    return;
+  }
+
+  const saveHeadlineId = parseDraftAction(callbackQuery.data, "save_headline");
+  if (saveHeadlineId !== null) {
+    try {
+      const result = await saveHeadlineAsDraft(saveHeadlineId);
+      await answerCallbackQuery(botToken, callbackQuery.id, "Збережено");
+      if (chatId) {
+        await sendMessage(botToken, chatId, result);
+      }
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : "Помилка збереження.";
+      await answerCallbackQuery(botToken, callbackQuery.id, errorMessage);
+      if (chatId) {
+        await sendMessage(botToken, chatId, `❌ ${errorMessage}`);
+      }
+    }
+    return;
+  }
+
+  const skipHeadlineId = parseDraftAction(callbackQuery.data, "skip_headline");
+  if (skipHeadlineId !== null) {
+    const removed = removePendingNewsHeadline(skipHeadlineId);
+    await answerCallbackQuery(botToken, callbackQuery.id, removed ? "Пропущено" : "Уже неактуально");
     return;
   }
 
