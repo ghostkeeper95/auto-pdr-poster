@@ -26,6 +26,108 @@ function normalizeWhitespace(text: string): string {
   return text.replace(/\s+/g, " ").trim();
 }
 
+function splitIntoSentences(text: string): string[] {
+  return text
+    .split(/(?<=[.!?…])\s+/u)
+    .map((sentence) => normalizeWhitespace(sentence))
+    .filter(Boolean);
+}
+
+function hasUnbalancedQuotes(text: string): boolean {
+  const quoteCount = (text.match(/["“”«»]/g) ?? []).length;
+  return quoteCount % 2 === 1;
+}
+
+function buildFallbackExplanationSummary(explanation: string): string {
+  const paragraphs = explanation
+    .split(/\n\s*\n/)
+    .map((paragraph) => normalizeWhitespace(paragraph))
+    .filter(Boolean);
+
+  const sentences = splitIntoSentences(paragraphs.join(" "));
+  if (sentences.length === 0) {
+    return normalizeWhitespace(explanation);
+  }
+
+  const selected: string[] = [];
+
+  const pushSentence = (sentence: string | undefined): void => {
+    if (!sentence) {
+      return;
+    }
+
+    const normalized = normalizeWhitespace(sentence);
+    if (!normalized || selected.includes(normalized)) {
+      return;
+    }
+
+    selected.push(normalized);
+  };
+
+  pushSentence(sentences.find((sentence) => /\b(згідно з|відповідно до|пункт(ом|у)?|пдр)\b/iu.test(sentence)));
+  pushSentence(sentences.find((sentence) => /\b(тобто|це означає|практично це означає)\b/iu.test(sentence)));
+  pushSentence(sentences.find((sentence) => /\b(отже|вірна відповідь|правильн(ий|а) варіант|правильна відповідь)\b/iu.test(sentence)));
+
+  if (selected.length < 2) {
+    for (const sentence of sentences) {
+      pushSentence(sentence);
+      if (selected.length >= 3) {
+        break;
+      }
+    }
+  }
+
+  const summary = selected.slice(0, 3).join(" ").trim();
+  if (summary.length <= 650) {
+    return summary;
+  }
+
+  const truncated = summary.slice(0, 649);
+  const lastBoundary = Math.max(
+    truncated.lastIndexOf(". "),
+    truncated.lastIndexOf("! "),
+    truncated.lastIndexOf("? "),
+  );
+
+  if (lastBoundary > 300) {
+    return truncated.slice(0, lastBoundary + 1).trim();
+  }
+
+  return `${truncated.trim()}…`;
+}
+
+function isWeakExplanationSummary(summary: string, explanation: string): boolean {
+  const normalizedSummary = normalizeWhitespace(summary);
+  const normalizedExplanation = normalizeWhitespace(explanation);
+  const summarySentences = splitIntoSentences(normalizedSummary);
+
+  if (!normalizedSummary) {
+    return true;
+  }
+
+  if (hasCorruptedOutput(normalizedSummary)) {
+    return true;
+  }
+
+  if (hasUnbalancedQuotes(normalizedSummary)) {
+    return true;
+  }
+
+  if (/[,:;\-–]$/u.test(normalizedSummary)) {
+    return true;
+  }
+
+  if (normalizedExplanation.length >= 240 && normalizedSummary.length < 110) {
+    return true;
+  }
+
+  if (normalizedExplanation.length >= 240 && summarySentences.length < 2) {
+    return true;
+  }
+
+  return false;
+}
+
 function getOpenRouterModels(): string[] {
   const configured = process.env.OPENROUTER_MODELS
     ?.split(",")
@@ -303,7 +405,16 @@ export async function summarizeExplanation(
 ${explanation}`;
 
   const result = await generateAiText(apiKey, prompt, { maxTokens: 350, temperature: 0.2 });
-  return result ?? explanation;
+  if (result && !isWeakExplanationSummary(result, explanation)) {
+    return result;
+  }
+
+  if (result) {
+    console.warn("AI explanation summary rejected as incomplete, using deterministic fallback");
+  }
+
+  const fallbackSummary = buildFallbackExplanationSummary(explanation);
+  return fallbackSummary || explanation;
 }
 
 export async function formatNewsPost(
