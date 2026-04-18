@@ -140,6 +140,11 @@ export function getNewsDraftById(id: number): NewsDraft | undefined {
   return state.newsDrafts.find((draft) => draft.id === id);
 }
 
+export function getNewsDraftByUrl(url: string): NewsDraft | undefined {
+  const state = loadState();
+  return state.newsDrafts.find((draft) => draft.url === url);
+}
+
 export function updateNewsDraftStatus(id: number, status: NewsDraft["status"]): NewsDraft | undefined {
   const state = loadState();
   const draft = state.newsDrafts.find((item) => item.id === id);
@@ -220,6 +225,23 @@ export function removePendingNewsHeadline(id: number): PendingNewsHeadline | und
   const index = state.pendingNewsHeadlines.findIndex((headline) => headline.id === id);
   if (index === -1) return undefined;
   const [removed] = state.pendingNewsHeadlines.splice(index, 1);
+  saveState(state);
+  return removed;
+}
+
+export function clearNewsDrafts(status: NewsDraft["status"] = "draft"): number {
+  const state = loadState();
+  const before = state.newsDrafts.length;
+  state.newsDrafts = state.newsDrafts.filter((draft) => draft.status !== status);
+  const removed = before - state.newsDrafts.length;
+  saveState(state);
+  return removed;
+}
+
+export function clearPendingNewsHeadlines(): number {
+  const state = loadState();
+  const removed = state.pendingNewsHeadlines.length;
+  state.pendingNewsHeadlines = [];
   saveState(state);
   return removed;
 }

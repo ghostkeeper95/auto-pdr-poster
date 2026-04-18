@@ -106,6 +106,10 @@ function normalizeArticleTitle(text: string): string {
     .trim();
 }
 
+function stripTrailingSourceDomain(text: string): string {
+  return normalizeWhitespace(text).replace(/\s+[a-z0-9-]+\.[a-z]{2,}(?:\s*)$/i, "").trim();
+}
+
 function isUsefulArticleParagraph(text: string): boolean {
   if (text.length < 45) return false;
 
@@ -134,6 +138,33 @@ function collectParagraphs($: cheerio.CheerioAPI, selectors: string[]): string[]
       .filter(isUsefulArticleParagraph);
 
     if (paragraphs.length >= 2) {
+      const result: string[] = [];
+      for (const paragraph of paragraphs) {
+        if (unique.has(paragraph)) continue;
+        unique.add(paragraph);
+        result.push(paragraph);
+      }
+      return result;
+    }
+  }
+
+  return [];
+}
+
+function collectParagraphsWithMinimum(
+  $: cheerio.CheerioAPI,
+  selectors: string[],
+  minimumCount: number,
+): string[] {
+  const unique = new Set<string>();
+
+  for (const selector of selectors) {
+    const paragraphs = $(selector)
+      .map((_i, el) => stripTrailingSourceDomain(normalizeWhitespace($(el).text())))
+      .get()
+      .filter(isUsefulArticleParagraph);
+
+    if (paragraphs.length >= minimumCount) {
       const result: string[] = [];
       for (const paragraph of paragraphs) {
         if (unique.has(paragraph)) continue;
@@ -262,7 +293,12 @@ function extractImageUrl($: cheerio.CheerioAPI, articleUrl: string, baseUrl: str
 
   for (const candidate of candidates) {
     if (candidate.startsWith("data:")) continue;
-    return new URL(candidate, baseUrl).toString();
+    const normalized = new URL(candidate, baseUrl).toString();
+    const lowered = normalized.toLowerCase();
+    if (lowered.endsWith(".svg") || lowered.includes("/svg/") || lowered.includes("logo")) {
+      continue;
+    }
+    return normalized;
   }
 
   return resolveNewsImageUrl(articleUrl);
@@ -297,6 +333,15 @@ async function fetchNewsCandidate(url: string): Promise<NewsCandidate | undefine
 }
 
 function extractGenericExcerpt($: cheerio.CheerioAPI): string {
+  const directBodyParagraphs = collectParagraphsWithMinimum($, [
+    "#content > .post > p",
+    "#content .post > p",
+    ".post > p",
+  ], 1);
+  if (directBodyParagraphs.length > 0) {
+    return truncate(directBodyParagraphs.slice(0, 6).join("\n\n"), 4000);
+  }
+
   const bodyParagraphs = collectParagraphs($, [
     ".article__content p",
     ".entry-content p",
@@ -323,6 +368,26 @@ function extractGenericExcerpt($: cheerio.CheerioAPI): string {
   }
 
   return "";
+}
+
+function resolveOriginalArticleUrl($: cheerio.CheerioAPI, articleUrl: string): string | undefined {
+  const link = $("#content .post a[href*='goto/'], .post a[href*='goto/']").first().attr("href");
+  if (!link) {
+    return undefined;
+  }
+
+  try {
+    const absolute = new URL(link, articleUrl).toString();
+    const marker = "/goto/";
+    const index = absolute.indexOf(marker);
+    if (index === -1) {
+      return absolute;
+    }
+
+    return decodeURIComponent(absolute.slice(index + marker.length));
+  } catch {
+    return undefined;
+  }
 }
 
 export async function fetchLatestNewsHeadlines(limit: number): Promise<NewsHeadline[]> {
@@ -373,14 +438,42 @@ export async function fetchNewsDraftFromHeadline(headline: NewsHeadline): Promis
   try {
     const html = await fetchNewsPage(headline.url);
     const $ = cheerio.load(html);
-    const pageTitle = normalizeArticleTitle(
+
+    let finalUrl = headline.url;
+    let final$ = $;
+    let pageTitle = normalizeArticleTitle(
       $("h1").first().text()
       || $("meta[property='og:title']").attr("content")
       || headline.title,
     );
-    const excerpt = extractGenericExcerpt($);
-    const imageBaseUrl = new URL(headline.url).origin;
-    const imageUrl = extractImageUrl($, headline.url, imageBaseUrl);
+    let excerpt = extractGenericExcerpt($);
+
+    const originalArticleUrl = resolveOriginalArticleUrl($, headline.url);
+    const shouldFollowOriginal = Boolean(
+      originalArticleUrl
+      && excerpt
+      && excerpt.length < 260
+      && new URL(headline.url).hostname.includes("newsyou.info"),
+    );
+
+    if (shouldFollowOriginal && originalArticleUrl) {
+      try {
+        const originalHtml = await fetchNewsPage(originalArticleUrl);
+        final$ = cheerio.load(originalHtml);
+        finalUrl = originalArticleUrl;
+        pageTitle = normalizeArticleTitle(
+          final$("h1").first().text()
+          || final$("meta[property='og:title']").attr("content")
+          || headline.title,
+        );
+        excerpt = extractGenericExcerpt(final$);
+      } catch (error) {
+        console.warn(`Failed to fetch original source for ${headline.url}:`, error);
+      }
+    }
+
+    const imageBaseUrl = new URL(finalUrl).origin;
+    const imageUrl = extractImageUrl(final$, finalUrl, imageBaseUrl);
 
     if (!pageTitle || !excerpt) {
       return undefined;
@@ -390,7 +483,7 @@ export async function fetchNewsDraftFromHeadline(headline: NewsHeadline): Promis
       source: headline.source,
       title: pageTitle,
       excerpt,
-      url: headline.url,
+      url: finalUrl,
       publishedAt: headline.publishedAt,
       imageUrl,
     };

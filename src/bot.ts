@@ -3,7 +3,7 @@ import { extractImageKeywords, formatNewsPost, shortenNewsPost } from "./ai.js";
 import { searchStockImage } from "./images.js";
 import { postQuestions } from "./index.js";
 import { buildBrandedImageUrl, fetchLatestNewsHeadlines, fetchNewsDraftFromHeadline, resolveNewsImageUrl } from "./news.js";
-import { getAllNewsDrafts, getNewsDraftById, getNewsDrafts, getPendingNewsHeadlineById, refreshNewsDraft, removePendingNewsHeadline, replacePendingNewsHeadlines, saveNewsDrafts, updateNewsDraft, updateNewsDraftStatus } from "./state.js";
+import { clearNewsDrafts, clearPendingNewsHeadlines, getAllNewsDrafts, getNewsDraftById, getNewsDraftByUrl, getNewsDrafts, getPendingNewsHeadlineById, refreshNewsDraft, removePendingNewsHeadline, replacePendingNewsHeadlines, saveNewsDrafts, updateNewsDraft, updateNewsDraftStatus } from "./state.js";
 import { getNewsCaptionBodyLimit, sendNewsToTelegram } from "./telegram.js";
 
 const TELEGRAM_API = "https://api.telegram.org";
@@ -62,6 +62,14 @@ async function answerCallbackQuery(botToken: string, callbackQueryId: string, te
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ callback_query_id: callbackQueryId, text, show_alert: false }),
+  });
+}
+
+async function deleteMessage(botToken: string, chatId: number, messageId: number): Promise<void> {
+  await fetch(`${TELEGRAM_API}/bot${botToken}/deleteMessage`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ chat_id: chatId, message_id: messageId }),
   });
 }
 
@@ -224,9 +232,10 @@ function buildHeadlineReplyMarkup(headlineId: number, url: string) {
     inline_keyboard: [
       [
         { text: "Відкрити", url },
-        { text: "Зберегти в draft", callback_data: `save_headline:${headlineId}` },
+        { text: "Preview", callback_data: `preview_headline:${headlineId}` },
       ],
       [
+        { text: "Зберегти в draft", callback_data: `save_headline:${headlineId}` },
         { text: "Пропустити", callback_data: `skip_headline:${headlineId}` },
       ],
     ],
@@ -334,9 +343,23 @@ async function publishDraft(botToken: string, draftId: number): Promise<string> 
 }
 
 async function saveHeadlineAsDraft(headlineId: number): Promise<string> {
+  const { message } = await createDraftFromHeadline(headlineId);
+  return message;
+}
+
+async function createDraftFromHeadline(headlineId: number): Promise<{ draftId: number; message: string }> {
   const headline = getPendingNewsHeadlineById(headlineId);
   if (!headline) {
     throw new Error("Цей заголовок уже неактуальний. Запусти /news_find ще раз.");
+  }
+
+  const existingDraft = getNewsDraftByUrl(headline.url);
+  removePendingNewsHeadline(headlineId);
+  if (existingDraft) {
+    return {
+      draftId: existingDraft.id,
+      message: `Ця стаття вже є в чернетках: ${existingDraft.id}. [${formatSourceLabel(existingDraft.source)} | ${existingDraft.publishedAt}] ${existingDraft.title}`,
+    };
   }
 
   const item = await fetchNewsDraftFromHeadline(headline);
@@ -345,14 +368,23 @@ async function saveHeadlineAsDraft(headlineId: number): Promise<string> {
   }
 
   const saved = saveNewsDrafts([item]);
-  removePendingNewsHeadline(headlineId);
 
   if (saved.length === 0) {
-    return "Ця стаття вже є в чернетках або вже оброблялася раніше.";
+    const currentDraft = getNewsDraftByUrl(headline.url);
+    if (currentDraft) {
+      return {
+        draftId: currentDraft.id,
+        message: `Ця стаття вже є в чернетках: ${currentDraft.id}. [${formatSourceLabel(currentDraft.source)} | ${currentDraft.publishedAt}] ${currentDraft.title}`,
+      };
+    }
+    throw new Error("Ця стаття вже є в чернетках або вже оброблялася раніше.");
   }
 
   const draft = saved[0];
-  return `✅ Збережено в чернетки: ${draft.id}. [${formatSourceLabel(draft.source)} | ${draft.publishedAt}] ${draft.title}`;
+  return {
+    draftId: draft.id,
+    message: `✅ Збережено в чернетки: ${draft.id}. [${formatSourceLabel(draft.source)} | ${draft.publishedAt}] ${draft.title}`,
+  };
 }
 
 async function refreshDraftPreviewCache(draftId: number): Promise<string> {
@@ -382,6 +414,41 @@ async function refreshDraftPreviewCache(draftId: number): Promise<string> {
   });
 
   return `♻️ Чернетку ${draftId} оновлено з джерела. Тепер /draft ${draftId} згенерує нове прев'ю.`;
+}
+
+async function sendDraftPreview(botToken: string, chatId: number, draftId: number): Promise<void> {
+  const draft = getNewsDraftById(draftId);
+  if (!draft) {
+    throw new Error("Чернетку не знайдено.");
+  }
+
+  await sendMessage(botToken, chatId, "⏳ Генерую прев'ю...");
+  const channelHandle = getChannelHandle();
+  const subscribeCta = buildSubscribeCta(channelHandle);
+  const body = await ensureRenderedBody(draftId, draft.title, draft.excerpt, {
+    previewLabel: "ПРЕВ'Ю",
+    subscribeCta,
+    url: draft.url,
+  });
+  const imageUrl = await resolvePreferredDraftImage(draftId, draft.title, draft.url, draft.imageUrl);
+
+  await sendNewsToTelegram(botToken, String(chatId), {
+    title: draft.title,
+    body,
+    url: draft.url,
+    imageUrl,
+    fallbackImageUrl: buildBrandedImageUrl(draft.title),
+    channelHandle,
+    previewLabel: "ПРЕВ'Ю",
+    subscribeCta,
+    replyMarkup: buildPublishReplyMarkup(draftId),
+  });
+}
+
+function clearAllDraftsState(): { draftCount: number; pendingCount: number } {
+  const draftCount = clearNewsDrafts("draft");
+  const pendingCount = clearPendingNewsHeadlines();
+  return { draftCount, pendingCount };
 }
 
 function isCommand(text: string): boolean {
@@ -426,6 +493,7 @@ async function handleCommand(
         "/post [N] - запостити тести",
         "/news_find [N] - показати заголовки новин для відбору",
         "/drafts - список чернеток",
+        "/drafts_clear - очистити всі активні чернетки і pending-стрічку",
         "/draft ID - перегляд чернетки",
         "/draft_refresh ID - оновити чернетку з джерела і скинути кеш прев'ю",
         "/draft_post ID - опублікувати чернетку",
@@ -437,6 +505,12 @@ async function handleCommand(
 
   if (text === "/drafts") {
     await sendMessage(botToken, chatId, formatDraftList());
+    return offset;
+  }
+
+  if (text === "/drafts_clear") {
+    const { draftCount, pendingCount } = clearAllDraftsState();
+    await sendMessage(botToken, chatId, `🧹 Очищено чернетки: ${draftCount}. Видалено кандидатів зі стрічки: ${pendingCount}.`);
     return offset;
   }
 
@@ -491,32 +565,12 @@ async function handleCommand(
 
   const previewDraftId = parseDraftIdCommand(text, "draft");
   if (previewDraftId !== null) {
-    const draft = getNewsDraftById(previewDraftId);
-    if (!draft) {
-      await sendMessage(botToken, chatId, "Чернетку не знайдено.");
-      return offset;
+    try {
+      await sendDraftPreview(botToken, chatId, previewDraftId);
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : "Помилка генерації прев'ю.";
+      await sendMessage(botToken, chatId, `❌ ${errorMessage}`);
     }
-
-    await sendMessage(botToken, chatId, "⏳ Генерую прев'ю...");
-    const channelHandle = getChannelHandle();
-    const subscribeCta = buildSubscribeCta(channelHandle);
-    const body = await ensureRenderedBody(previewDraftId, draft.title, draft.excerpt, {
-      previewLabel: "ПРЕВ'Ю",
-      subscribeCta,
-      url: draft.url,
-    });
-    const imageUrl = await resolvePreferredDraftImage(previewDraftId, draft.title, draft.url, draft.imageUrl);
-    await sendNewsToTelegram(botToken, String(chatId), {
-      title: draft.title,
-      body,
-      url: draft.url,
-      imageUrl,
-      fallbackImageUrl: buildBrandedImageUrl(draft.title),
-      channelHandle,
-      previewLabel: "ПРЕВ'Ю",
-      subscribeCta,
-      replyMarkup: buildPublishReplyMarkup(previewDraftId),
-    });
     return offset;
   }
 
@@ -585,6 +639,7 @@ async function handleCallbackQuery(
 ): Promise<void> {
   const userId = callbackQuery.from.id;
   const chatId = callbackQuery.message?.chat.id;
+  const messageId = callbackQuery.message?.message_id;
 
   if (!adminIds.has(userId)) {
     if (chatId) {
@@ -617,6 +672,9 @@ async function handleCallbackQuery(
     try {
       const result = await saveHeadlineAsDraft(saveHeadlineId);
       await answerCallbackQuery(botToken, callbackQuery.id, "Збережено");
+      if (chatId && messageId) {
+        await deleteMessage(botToken, chatId, messageId).catch(() => undefined);
+      }
       if (chatId) {
         await sendMessage(botToken, chatId, result);
       }
@@ -630,9 +688,34 @@ async function handleCallbackQuery(
     return;
   }
 
+  const previewHeadlineId = parseDraftAction(callbackQuery.data, "preview_headline");
+  if (previewHeadlineId !== null) {
+    try {
+      const result = await createDraftFromHeadline(previewHeadlineId);
+      await answerCallbackQuery(botToken, callbackQuery.id, "Створюю прев'ю");
+      if (chatId && messageId) {
+        await deleteMessage(botToken, chatId, messageId).catch(() => undefined);
+      }
+      if (chatId) {
+        await sendMessage(botToken, chatId, result.message);
+        await sendDraftPreview(botToken, chatId, result.draftId);
+      }
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : "Помилка генерації прев'ю.";
+      await answerCallbackQuery(botToken, callbackQuery.id, errorMessage);
+      if (chatId) {
+        await sendMessage(botToken, chatId, `❌ ${errorMessage}`);
+      }
+    }
+    return;
+  }
+
   const skipHeadlineId = parseDraftAction(callbackQuery.data, "skip_headline");
   if (skipHeadlineId !== null) {
     const removed = removePendingNewsHeadline(skipHeadlineId);
+    if (removed && chatId && messageId) {
+      await deleteMessage(botToken, chatId, messageId).catch(() => undefined);
+    }
     await answerCallbackQuery(botToken, callbackQuery.id, removed ? "Пропущено" : "Уже неактуально");
     return;
   }

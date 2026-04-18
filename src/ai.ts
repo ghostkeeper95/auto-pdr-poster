@@ -63,9 +63,28 @@ function buildFallbackNewsPost(excerpt: string, maxLength?: number): string {
     .split(/\n\s*\n/)
     .map((paragraph) => normalizeWhitespace(paragraph))
     .filter((paragraph) => paragraph.length > 0)
-    .slice(0, 4);
+    .slice(0, 5);
 
-  const body = paragraphs.join("\n\n").trim();
+  if (paragraphs.length === 0) {
+    return "";
+  }
+
+  const firstParagraph = paragraphs[0];
+  const detailLines = paragraphs
+    .slice(1)
+    .map((paragraph) => {
+      const sentenceBoundary = paragraph.search(/[.!?](\s|$)/);
+      const firstSentence = sentenceBoundary >= 0 ? paragraph.slice(0, sentenceBoundary + 1) : paragraph;
+      return normalizeWhitespace(firstSentence);
+    })
+    .filter((paragraph, index, items) => paragraph.length >= 45 && items.indexOf(paragraph) === index)
+    .slice(0, 3);
+
+  const body = [
+    firstParagraph,
+    detailLines.length > 0 ? detailLines.map((line) => `• ${line}`).join("\n") : paragraphs.slice(1, 3).join("\n\n"),
+  ].filter(Boolean).join("\n\n").trim();
+
   if (!maxLength || body.length <= maxLength) {
     return body;
   }
@@ -83,6 +102,75 @@ function buildFallbackNewsPost(excerpt: string, maxLength?: number): string {
   }
 
   return `${truncated.trim()}…`;
+}
+
+function countConcreteSignals(text: string): number {
+  const matches = text.match(/\b\d+[\d.,]*\b|\*\*[^*]+\*\*|\b(до кінця|зокрема|через|після|заявив|заявила|міністр|уряд|закон|реформа|єс|водіїв?|авто)\b/giu);
+  return matches?.length ?? 0;
+}
+
+function hasCorruptedOutput(text: string): boolean {
+  if (text.includes("�")) {
+    return true;
+  }
+
+  const normalized = normalizeWhitespace(text);
+  const repeatedFragment = normalized.match(/(.{40,120}?)\1{1,}/u);
+  return Boolean(repeatedFragment);
+}
+
+function isWeakNewsPost(post: string, excerpt: string): boolean {
+  const normalizedPost = normalizeWhitespace(post);
+  const normalizedExcerpt = normalizeWhitespace(excerpt);
+  const sentenceCount = normalizedPost.split(/[.!?]+/).map((item) => item.trim()).filter(Boolean).length;
+  const paragraphCount = post.split(/\n\s*\n/).map((item) => item.trim()).filter(Boolean).length;
+  const wordCount = normalizedPost.split(/\s+/).filter(Boolean).length;
+  const excerptWordCount = normalizedExcerpt.split(/\s+/).filter(Boolean).length;
+  const concreteSignals = countConcreteSignals(normalizedPost);
+
+  if (hasCorruptedOutput(post)) {
+    return true;
+  }
+
+  if (normalizedPost.length < 90 || wordCount < 14) {
+    return true;
+  }
+
+  if (excerptWordCount >= 60 && normalizedPost.length < 140) {
+    return true;
+  }
+
+  if (excerptWordCount >= 80 && sentenceCount < 2) {
+    return true;
+  }
+
+  if (excerptWordCount >= 80 && concreteSignals < 2) {
+    return true;
+  }
+
+  return paragraphCount === 0;
+}
+
+function buildRescueNewsPrompt(title: string, excerpt: string, targetLength: string): string {
+  return `Перепиши новину в змістовний Telegram-пост українською.
+
+Жорсткі вимоги:
+- Не можна повертати один короткий рядок або загальну фразу.
+- Потрібно щонайменше 2 абзаци.
+- Потрібно включити мінімум 3 конкретні деталі з тексту, якщо вони є: цифри, строки, причини, імена, дії, умови.
+- Якщо новина прикладна, дай короткий перелік дій або причин.
+- Не вигадуй фактів.
+- Не дублюй заголовок.
+- Без URL, без хештегів.
+- Довжина: ${targetLength}.
+
+Поверни тільки готовий пост.
+
+Заголовок:
+${title}
+
+Матеріал:
+${excerpt}`;
 }
 
 async function generateGeminiText(
@@ -112,6 +200,9 @@ async function generateGeminiText(
         console.log(`AI summary via ${model}`);
         return text.trim();
       }
+
+      console.warn(`Gemini API returned empty content (${model})`);
+      continue;
     }
 
     const errorBody = await res.text();
@@ -154,6 +245,9 @@ async function generateOpenRouterText(
         console.log(`AI summary via ${model} on OpenRouter`);
         return text.trim();
       }
+
+      console.warn(`OpenRouter API returned empty content (${model})`);
+      continue;
     }
 
     const errorBody = await res.text();
@@ -176,6 +270,23 @@ async function generateAiText(
   }
 
   return generateOpenRouterText(prompt, options);
+}
+
+async function generateAlternativeAiText(
+  geminiApiKey: string | undefined,
+  prompt: string,
+  options: TextGenerationOptions = {},
+): Promise<string | undefined> {
+  const openRouterText = await generateOpenRouterText(prompt, options);
+  if (openRouterText) {
+    return openRouterText;
+  }
+
+  if (geminiApiKey?.trim()) {
+    return generateGeminiText(geminiApiKey, prompt, options);
+  }
+
+  return undefined;
 }
 
 export async function summarizeExplanation(
@@ -234,7 +345,25 @@ ${excerpt}`;
     maxTokens: Math.min(1200, Math.max(350, Math.ceil((maxLength ?? 900) / 2))),
     temperature: 0.25,
   });
-  return result ?? buildFallbackNewsPost(excerpt, maxLength);
+
+  if (result && !isWeakNewsPost(result, excerpt)) {
+    return result;
+  }
+
+  if (result) {
+    console.warn("AI post rejected as too weak, requesting rescue rewrite");
+  }
+
+  const rescue = await generateAlternativeAiText(apiKey, buildRescueNewsPrompt(title, excerpt, targetLength), {
+    maxTokens: Math.min(1200, Math.max(350, Math.ceil((maxLength ?? 900) / 2))),
+    temperature: 0.2,
+  });
+
+  if (rescue && !isWeakNewsPost(rescue, excerpt)) {
+    return rescue;
+  }
+
+  return buildFallbackNewsPost(excerpt, maxLength);
 }
 
 export async function shortenNewsPost(
