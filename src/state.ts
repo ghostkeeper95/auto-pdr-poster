@@ -69,6 +69,28 @@ export interface ForwardDraft {
   status: "draft" | "posted" | "rejected";
 }
 
+export interface TikTokDraft {
+  id: number;
+  videoUrl: string;
+  downloadUrl: string;
+  fallbackUrl?: string;
+  title: string;
+  caption?: string;
+  promoHtml?: string;
+  promoText?: string;
+  promoEntities?: Array<{
+    type: string;
+    offset: number;
+    length: number;
+    url?: string;
+    language?: string;
+    custom_emoji_id?: string;
+    user?: { id: number };
+  }>;
+  createdAt: string;
+  status: "draft" | "posted" | "rejected";
+}
+
 export interface ScheduledPost {
   id: number;
   kind: "news" | "test" | "forward";
@@ -89,7 +111,9 @@ export interface AdminSession {
     | "edit_promo_template"
     | "schedule_news"
     | "schedule_test"
-    | "schedule_forward";
+    | "schedule_forward"
+    | "edit_tiktok_caption"
+    | "edit_tiktok_promo";
   targetId: number;
   createdAt: string;
 }
@@ -126,6 +150,8 @@ interface State {
   nextScheduledPostId: number;
   adminSessions: Record<string, AdminSession>;
   promoTemplates: PromoTemplate[];
+  tiktokDrafts: TikTokDraft[];
+  nextTikTokDraftId: number;
 }
 
 function loadState(): State {
@@ -145,6 +171,8 @@ function loadState(): State {
       nextScheduledPostId: 1,
       adminSessions: {},
       promoTemplates: [],
+      tiktokDrafts: [],
+      nextTikTokDraftId: 1,
     };
   }
 
@@ -166,6 +194,8 @@ function loadState(): State {
     nextScheduledPostId: parsed.nextScheduledPostId ?? 1,
     adminSessions: parsed.adminSessions ?? {},
     promoTemplates: parsed.promoTemplates ?? [],
+    tiktokDrafts: parsed.tiktokDrafts ?? [],
+    nextTikTokDraftId: parsed.nextTikTokDraftId ?? 1,
   };
 }
 
@@ -570,4 +600,59 @@ export function deletePromoTemplate(slot: 1 | 2 | 3): void {
   const state = loadState();
   state.promoTemplates = state.promoTemplates.filter((item) => item.slot !== slot);
   saveState(state);
+}
+
+export function saveTikTokDraft(
+  videoUrl: string,
+  downloadUrl: string,
+  title: string,
+  fallbackUrl?: string,
+): TikTokDraft {
+  const state = loadState();
+  const draft: TikTokDraft = {
+    id: state.nextTikTokDraftId,
+    videoUrl,
+    downloadUrl,
+    fallbackUrl,
+    title,
+    createdAt: new Date().toISOString(),
+    status: "draft",
+  };
+  state.tiktokDrafts.push(draft);
+  state.nextTikTokDraftId += 1;
+  saveState(state);
+  return draft;
+}
+
+export function getTikTokDrafts(status: TikTokDraft["status"] = "draft"): TikTokDraft[] {
+  const state = loadState();
+  return state.tiktokDrafts.filter((draft) => draft.status === status);
+}
+
+export function getTikTokDraftById(id: number): TikTokDraft | undefined {
+  const state = loadState();
+  return state.tiktokDrafts.find((draft) => draft.id === id);
+}
+
+export function updateTikTokDraft(
+  id: number,
+  updates: Partial<Pick<TikTokDraft, "caption" | "promoHtml" | "promoText" | "promoEntities">>,
+): void {
+  const state = loadState();
+  const draft = state.tiktokDrafts.find((item) => item.id === id);
+  if (!draft) return;
+  Object.assign(draft, updates);
+  saveState(state);
+}
+
+export function updateTikTokDraftStatus(
+  id: number,
+  status: TikTokDraft["status"],
+): TikTokDraft | undefined {
+  const state = loadState();
+  const draft = state.tiktokDrafts.find((item) => item.id === id);
+  if (!draft) return undefined;
+  draft.status = status;
+  saveState(state);
+  return draft;
 }

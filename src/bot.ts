@@ -26,6 +26,8 @@ import {
   getScheduledPosts,
   getTestDraftById,
   getTestDrafts,
+  getTikTokDraftById,
+  getTikTokDrafts,
   isPosted,
   markPosted,
   refreshNewsDraft,
@@ -35,6 +37,7 @@ import {
   saveNewsDrafts,
   savePromoTemplate,
   saveTestDraft,
+  saveTikTokDraft,
   schedulePost,
   setAdminSession,
   updateForwardDraftStatus,
@@ -43,10 +46,13 @@ import {
   updateScheduledPost,
   updateTestDraft,
   updateTestDraftStatus,
+  updateTikTokDraft,
+  updateTikTokDraftStatus,
   type AdminSession,
   type ScheduledPost,
 } from "./state.js";
-import { entitiesToHtml, getLinkedChatId, getNewsCaptionBodyLimit, sendExplanationComment, sendNewsToTelegram, sendQuizToTelegram, type TelegramMessageEntity } from "./telegram.js";
+import { entitiesToHtml, getLinkedChatId, getNewsCaptionBodyLimit, sendExplanationComment, sendNewsToTelegram, sendQuizToTelegram, sendVideoToTelegram, type TelegramMessageEntity } from "./telegram.js";
+import { fetchTikTokInfo, isTikTokUrl } from "./tiktok.js";
 
 const TOTAL_SECTIONS = 71;
 const BATCH_POST_DELAY_MS = 3000;
@@ -160,6 +166,7 @@ function getMainMenuText(): string {
     `Новини: ${getNewsDrafts("draft").length} чернеток`,
     `Тести: ${getTestDrafts("draft").length} чернеток`,
     `Форварди: ${getForwardDrafts("draft").length} чернеток`,
+    `TikTok: ${getTikTokDrafts("draft").length} чернеток`,
     `Заплановано: ${getScheduledPosts("pending").length}`,
   ].join("\n");
 }
@@ -172,7 +179,9 @@ function getMainMenuKeyboard(): InlineKeyboard {
     .text("📅 Розклад", "nav:schedule")
     .text("📥 Форварди", "nav:forwards")
     .row()
+    .text("🎵 TikTok", "nav:tiktok")
     .text("📢 Промо-шаблони", "nav:promo")
+    .row()
     .text("↻ Оновити", "nav:main");
 }
 
@@ -548,6 +557,108 @@ async function showNewsPromoPicker(ctx: any, draftId: number): Promise<void> {
     lines.push("", "Поточна реклама:", truncatePreview(stripHtmlForPreview(draft.promoHtml), 120));
   }
   await showMenu(ctx, lines.join("\n"), buildNewsPromoPickerKeyboard(draftId));
+}
+
+function buildTikTokDraftActionsKeyboard(draftId: number): InlineKeyboard {
+  return new InlineKeyboard()
+    .text("✏️ Опис", `tiktok_caption:${draftId}`)
+    .text("📢 Реклама", `tiktok_promo_menu:${draftId}`)
+    .row()
+    .text("🚀 Опублікувати", `tiktok_publish:${draftId}`)
+    .text("🗑 Відхилити", `tiktok_reject:${draftId}`);
+}
+
+function buildTikTokPromoPickerKeyboard(draftId: number): InlineKeyboard {
+  const keyboard = new InlineKeyboard();
+  const templates = getPromoTemplates();
+  for (const template of templates) {
+    keyboard.text(`📢 ${template.slot}. ${truncatePreview(template.label, 24)}`, `tiktok_promo_apply:${draftId}:${template.slot}`).row();
+  }
+  keyboard.text("✍️ Ввести вручну", `tiktok_promo_manual:${draftId}`).row();
+  keyboard.text("🧹 Прибрати", `tiktok_promo_clear:${draftId}`).row();
+  keyboard.text("⬅️ До відео", `tiktok_draft:${draftId}`);
+  return keyboard;
+}
+
+async function showTikTokDraftCard(ctx: any, draftId: number): Promise<void> {
+  const draft = getTikTokDraftById(draftId);
+  if (!draft) {
+    await ctx.reply("❌ Чернетку TikTok не знайдено.");
+    return;
+  }
+
+  const lines = [
+    `🎵 TikTok #${draft.id}`,
+    "",
+    `Посилання: ${draft.videoUrl}`,
+  ];
+  if (draft.title) {
+    lines.push(`Опис з TikTok: ${truncate(draft.title, 120)}`);
+  }
+  if (draft.caption?.trim()) {
+    lines.push("", "✏️ Ваш опис:", draft.caption);
+  }
+  if (draft.promoHtml?.trim()) {
+    lines.push("", "📢 Реклама:", truncatePreview(stripHtmlForPreview(draft.promoHtml), 100));
+  }
+
+  await showMenu(ctx, lines.join("\n"), buildTikTokDraftActionsKeyboard(draftId));
+}
+
+async function showTikTokPromoPicker(ctx: any, draftId: number): Promise<void> {
+  const draft = getTikTokDraftById(draftId);
+  if (!draft) {
+    await ctx.answerCallbackQuery({ text: "Чернетку не знайдено." });
+    return;
+  }
+  const templates = getPromoTemplates();
+  const lines = [`📢 Реклама для TikTok #${draftId}`, ""];
+  if (templates.length === 0) {
+    lines.push("Немає збережених шаблонів. Створи їх у головному меню → Промо-шаблони,");
+    lines.push("або введи рекламу вручну.");
+  } else {
+    lines.push("Обери шаблон або введи вручну:");
+    for (const template of templates) {
+      lines.push(`• ${template.slot}. ${template.label}`);
+    }
+  }
+  if (draft.promoHtml?.trim()) {
+    lines.push("", "Поточна реклама:", truncatePreview(stripHtmlForPreview(draft.promoHtml), 120));
+  }
+  await showMenu(ctx, lines.join("\n"), buildTikTokPromoPickerKeyboard(draftId));
+}
+
+async function showTikTokDraftList(ctx: any): Promise<void> {
+  const drafts = getTikTokDrafts("draft").slice(-10).reverse();
+  const keyboard = new InlineKeyboard();
+  for (const draft of drafts) {
+    keyboard.text(truncate(`#${draft.id} ${draft.title || draft.videoUrl}`, 40), `tiktok_draft:${draft.id}`).row();
+  }
+  keyboard.text("⬅️ Назад", "nav:main");
+
+  const text = drafts.length === 0
+    ? "🎵 Чернеток TikTok поки немає.\n\nНадішли посилання на TikTok відео, і я його збережу."
+    : [
+      "🎵 TikTok чернетки",
+      "",
+      ...drafts.map((draft) => `#${draft.id} · ${truncate(draft.title || draft.videoUrl, 60)}`),
+    ].join("\n");
+
+  await showMenu(ctx, text, keyboard);
+}
+
+async function publishTikTokDraft(draftId: number): Promise<string> {
+  const draft = getTikTokDraftById(draftId);
+  if (!draft) throw new Error("Чернетку TikTok не знайдено.");
+
+  await sendVideoToTelegram(BOT_TOKEN, CHANNEL_CHAT_ID, draft.downloadUrl, {
+    caption: draft.caption,
+    promoHtml: draft.promoHtml,
+    fallbackVideoUrl: draft.fallbackUrl,
+  });
+
+  updateTikTokDraftStatus(draftId, "posted");
+  return `✅ TikTok #${draftId} опубліковано.`;
 }
 
 async function showNewsDraftList(ctx: any): Promise<void> {
@@ -1074,6 +1185,43 @@ async function handleSessionInput(ctx: any, text: string): Promise<boolean> {
       await showNewsDraftCard(ctx, session.targetId);
       return true;
     }
+    case "edit_tiktok_caption": {
+      clearAdminSession(ctx.from.id);
+      const clear = text.trim() === "—" || text.trim() === "-" || text.trim().toLowerCase() === "clear";
+      if (clear) {
+        updateTikTokDraft(session.targetId, { caption: undefined });
+        await ctx.reply(`🧹 Опис для TikTok #${session.targetId} прибрано.`);
+      } else {
+        updateTikTokDraft(session.targetId, { caption: text });
+        await ctx.reply(`✅ Опис для TikTok #${session.targetId} збережено.`);
+      }
+      await showTikTokDraftCard(ctx, session.targetId);
+      return true;
+    }
+    case "edit_tiktok_promo": {
+      const tiktokDraft = getTikTokDraftById(session.targetId);
+      if (!tiktokDraft) {
+        clearAdminSession(ctx.from.id);
+        await ctx.reply("❌ Чернетку TikTok не знайдено.");
+        return true;
+      }
+      const clear = text.trim() === "—" || text.trim() === "-" || text.trim().toLowerCase() === "clear";
+      if (clear) {
+        updateTikTokDraft(session.targetId, { promoHtml: undefined, promoText: undefined, promoEntities: undefined });
+        clearAdminSession(ctx.from.id);
+        await ctx.reply(`🧹 Рекламу для TikTok #${session.targetId} прибрано.`);
+        await showTikTokDraftCard(ctx, session.targetId);
+        return true;
+      }
+      const tiktokEntities = (ctx.msg?.entities ?? ctx.msg?.caption_entities ?? []) as TelegramMessageEntity[];
+      const tiktokRawText = (ctx.msg?.text ?? ctx.msg?.caption ?? text) as string;
+      const tiktokPromoHtml = entitiesToHtml(tiktokRawText, tiktokEntities);
+      updateTikTokDraft(session.targetId, { promoHtml: tiktokPromoHtml, promoText: tiktokRawText, promoEntities: tiktokEntities });
+      clearAdminSession(ctx.from.id);
+      await ctx.reply(`✅ Рекламу для TikTok #${session.targetId} збережено.`);
+      await showTikTokDraftCard(ctx, session.targetId);
+      return true;
+    }
     case "edit_promo_template": {
       const slot = session.targetId as 1 | 2 | 3;
       const clear = text.trim() === "—" || text.trim() === "-" || text.trim().toLowerCase() === "clear";
@@ -1138,6 +1286,9 @@ async function handleNavCallback(ctx: any, target: string): Promise<void> {
       return;
     case "forwards":
       await showForwardsMenu(ctx);
+      return;
+    case "tiktok":
+      await showTikTokDraftList(ctx);
       return;
     case "promo":
       await showPromoMenu(ctx);
@@ -1608,6 +1759,84 @@ bot.on("callback_query:data", async (ctx) => {
     return;
   }
 
+  if (data.startsWith("tiktok_draft:")) {
+    await ctx.answerCallbackQuery();
+    await showTikTokDraftCard(ctx, Number(data.split(":")[1]));
+    return;
+  }
+
+  if (data.startsWith("tiktok_caption:")) {
+    const draftId = Number(data.split(":")[1]);
+    setAdminSession({ userId: ctx.from.id, mode: "edit_tiktok_caption", targetId: draftId, createdAt: new Date().toISOString() });
+    await ctx.answerCallbackQuery();
+    await ctx.reply(`✏️ Надішли опис для відео TikTok #${draftId}.\n• Надішли «—» щоб прибрати опис.\n• /cancel — скасувати.`);
+    return;
+  }
+
+  if (data.startsWith("tiktok_promo_menu:")) {
+    const draftId = Number(data.split(":")[1]);
+    await showTikTokPromoPicker(ctx, draftId);
+    return;
+  }
+
+  if (data.startsWith("tiktok_promo_apply:")) {
+    const [, draftIdRaw, slotRaw] = data.split(":");
+    const draftId = Number(draftIdRaw);
+    const slot = Number(slotRaw) as 1 | 2 | 3;
+    const template = getPromoTemplate(slot);
+    if (!template) {
+      await ctx.answerCallbackQuery({ text: "Шаблон порожній" });
+      return;
+    }
+    updateTikTokDraft(draftId, {
+      promoHtml: template.html,
+      promoText: template.text,
+      promoEntities: template.entities,
+    });
+    await ctx.answerCallbackQuery({ text: `Застосовано: ${template.label}` });
+    await showTikTokDraftCard(ctx, draftId);
+    return;
+  }
+
+  if (data.startsWith("tiktok_promo_manual:")) {
+    const draftId = Number(data.split(":")[1]);
+    setAdminSession({ userId: ctx.from.id, mode: "edit_tiktok_promo", targetId: draftId, createdAt: new Date().toISOString() });
+    await ctx.answerCallbackQuery();
+    await ctx.reply(
+      `📢 Надішли текст реклами для TikTok #${draftId}.\n• Форматування (жирний, курсив, посилання, емодзі) зберігається.\n• Надішли «—» щоб прибрати.\n• /cancel — скасувати.`,
+    );
+    return;
+  }
+
+  if (data.startsWith("tiktok_promo_clear:")) {
+    const draftId = Number(data.split(":")[1]);
+    updateTikTokDraft(draftId, { promoHtml: undefined, promoText: undefined, promoEntities: undefined });
+    await ctx.answerCallbackQuery({ text: "Прибрано" });
+    await showTikTokDraftCard(ctx, draftId);
+    return;
+  }
+
+  if (data.startsWith("tiktok_publish:")) {
+    try {
+      const result = await publishTikTokDraft(Number(data.split(":")[1]));
+      await ctx.answerCallbackQuery({ text: "Опубліковано" });
+      await ctx.reply(result);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      await ctx.answerCallbackQuery({ text: message });
+      await ctx.reply(`❌ ${message}`);
+    }
+    return;
+  }
+
+  if (data.startsWith("tiktok_reject:")) {
+    const draftId = Number(data.split(":")[1]);
+    updateTikTokDraftStatus(draftId, "rejected");
+    await ctx.answerCallbackQuery({ text: "Відхилено" });
+    await ctx.reply(`🗑 TikTok #${draftId} відхилено.`);
+    return;
+  }
+
   await ctx.answerCallbackQuery({ text: "Невідома дія." });
 });
 
@@ -1707,6 +1936,20 @@ bot.on("message", async (ctx) => {
 
     if (text.startsWith("/")) {
       await ctx.reply("Невідома команда. Використовуй /menu.");
+      return;
+    }
+
+    if (isTikTokUrl(text)) {
+      await ctx.reply("⏳ Завантажую TikTok відео без вотермарки...");
+      try {
+        const info = await fetchTikTokInfo(text);
+        const draft = saveTikTokDraft(info.videoUrl, info.downloadUrl, info.title, info.fallbackUrl);
+        await ctx.reply(`🎵 Збережено як TikTok чернетку #${draft.id}.`);
+        await showTikTokDraftCard(ctx, draft.id);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        await ctx.reply(`❌ Не вдалося завантажити відео: ${message}`);
+      }
       return;
     }
   }

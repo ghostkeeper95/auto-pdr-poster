@@ -400,6 +400,66 @@ export async function sendNewsToTelegram(
   await sendUploadedPhoto(botToken, chatId, caption, post.replyMarkup);
 }
 
+export async function sendVideoToTelegram(
+  botToken: string,
+  chatId: string,
+  videoUrl: string,
+  options?: {
+    caption?: string;
+    promoHtml?: string;
+    fallbackVideoUrl?: string;
+    replyMarkup?: { inline_keyboard: Array<Array<{ text: string; callback_data?: string; url?: string }>> };
+  },
+): Promise<void> {
+  const parts: string[] = [];
+  if (options?.caption?.trim()) {
+    parts.push(escapeHtml(options.caption.trim()));
+  }
+  if (options?.promoHtml?.trim()) {
+    if (parts.length > 0) parts.push("");
+    parts.push(options.promoHtml.trim());
+  }
+  const captionText = parts.join("\n");
+
+  const downloadHeaders = {
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Referer": "https://www.tiktok.com/",
+  };
+
+  const urlsToTry = [videoUrl, options?.fallbackVideoUrl].filter((u): u is string => Boolean(u));
+  let videoBuffer: ArrayBuffer | undefined;
+
+  for (const url of urlsToTry) {
+    const videoRes = await fetch(url, { headers: downloadHeaders });
+    if (videoRes.ok) {
+      videoBuffer = await videoRes.arrayBuffer();
+      break;
+    }
+    console.warn(`Failed to download video from ${url}: ${videoRes.status}`);
+  }
+
+  if (!videoBuffer) {
+    throw new Error("Не вдалося завантажити відео (всі варіанти вичерпано)");
+  }
+
+  const form = new FormData();
+  form.append("chat_id", chatId);
+  form.append("video", new Blob([videoBuffer], { type: "video/mp4" }), "video.mp4");
+  form.append("parse_mode", "HTML");
+  if (captionText) form.append("caption", captionText);
+  if (options?.replyMarkup) form.append("reply_markup", JSON.stringify(options.replyMarkup));
+
+  const res = await fetch(`${TELEGRAM_API}/bot${botToken}/sendVideo`, {
+    method: "POST",
+    body: form,
+  });
+
+  const result = (await res.json()) as TelegramResponse;
+  if (!result.ok) {
+    throw new Error(`Telegram sendVideo error: ${result.description}`);
+  }
+}
+
 export async function sendExplanationComment(
   botToken: string,
   chatId: number | string,
