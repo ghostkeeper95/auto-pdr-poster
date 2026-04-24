@@ -1,6 +1,7 @@
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import type { Question } from "./scraper.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const STATE_DIR = process.env.STATE_DIR ?? resolve(__dirname, "..");
@@ -16,6 +17,18 @@ export interface NewsDraft {
   imageUrl?: string;
   renderedBody?: string;
   stockImageUrl?: string;
+  promoHtml?: string;
+  promoText?: string;
+  promoEntities?: Array<{
+    type: string;
+    offset: number;
+    length: number;
+    url?: string;
+    language?: string;
+    custom_emoji_id?: string;
+    user?: { id: number };
+  }>;
+  showSource?: boolean;
   createdAt: string;
   status: "draft" | "posted" | "rejected";
 }
@@ -29,6 +42,75 @@ export interface PendingNewsHeadline {
   createdAt: string;
 }
 
+export interface TestDraft {
+  id: number;
+  question: Question;
+  explanation?: string;
+  promoHtml?: string;
+  promoText?: string;
+  promoEntities?: Array<{
+    type: string;
+    offset: number;
+    length: number;
+    url?: string;
+    language?: string;
+    custom_emoji_id?: string;
+    user?: { id: number };
+  }>;
+  createdAt: string;
+  status: "draft" | "posted" | "rejected";
+}
+
+export interface ForwardDraft {
+  id: number;
+  sourceChatId: number;
+  sourceMessageId: number;
+  createdAt: string;
+  status: "draft" | "posted" | "rejected";
+}
+
+export interface ScheduledPost {
+  id: number;
+  kind: "news" | "test" | "forward";
+  targetId: number;
+  runAt: string;
+  createdAt: string;
+  status: "pending" | "sent" | "failed" | "cancelled";
+  lastError?: string;
+}
+
+export interface AdminSession {
+  userId: number;
+  mode:
+    | "edit_news_title"
+    | "edit_news_body"
+    | "edit_news_promo"
+    | "edit_test_promo"
+    | "edit_promo_template"
+    | "schedule_news"
+    | "schedule_test"
+    | "schedule_forward";
+  targetId: number;
+  createdAt: string;
+}
+
+export interface PromoTemplate {
+  slot: 1 | 2 | 3;
+  label: string;
+  html: string;
+  text?: string;
+  entities?: Array<{
+    type: string;
+    offset: number;
+    length: number;
+    url?: string;
+    language?: string;
+    custom_emoji_id?: string;
+    user?: { id: number };
+  }>;
+  updatedAt: string;
+}
+
 interface State {
   postedIds: string[];
   lastSection: number;
@@ -36,6 +118,14 @@ interface State {
   newsDrafts: NewsDraft[];
   pendingNewsHeadlines: PendingNewsHeadline[];
   nextPendingNewsId: number;
+  testDrafts: TestDraft[];
+  nextTestDraftId: number;
+  forwardDrafts: ForwardDraft[];
+  nextForwardDraftId: number;
+  scheduledPosts: ScheduledPost[];
+  nextScheduledPostId: number;
+  adminSessions: Record<string, AdminSession>;
+  promoTemplates: PromoTemplate[];
 }
 
 function loadState(): State {
@@ -47,6 +137,14 @@ function loadState(): State {
       newsDrafts: [],
       pendingNewsHeadlines: [],
       nextPendingNewsId: 1,
+      testDrafts: [],
+      nextTestDraftId: 1,
+      forwardDrafts: [],
+      nextForwardDraftId: 1,
+      scheduledPosts: [],
+      nextScheduledPostId: 1,
+      adminSessions: {},
+      promoTemplates: [],
     };
   }
 
@@ -60,6 +158,14 @@ function loadState(): State {
     newsDrafts: parsed.newsDrafts ?? [],
     pendingNewsHeadlines: parsed.pendingNewsHeadlines ?? [],
     nextPendingNewsId: parsed.nextPendingNewsId ?? 1,
+    testDrafts: parsed.testDrafts ?? [],
+    nextTestDraftId: parsed.nextTestDraftId ?? 1,
+    forwardDrafts: parsed.forwardDrafts ?? [],
+    nextForwardDraftId: parsed.nextForwardDraftId ?? 1,
+    scheduledPosts: parsed.scheduledPosts ?? [],
+    nextScheduledPostId: parsed.nextScheduledPostId ?? 1,
+    adminSessions: parsed.adminSessions ?? {},
+    promoTemplates: parsed.promoTemplates ?? [],
   };
 }
 
@@ -154,7 +260,10 @@ export function updateNewsDraftStatus(id: number, status: NewsDraft["status"]): 
   return draft;
 }
 
-export function updateNewsDraft(id: number, updates: Partial<Pick<NewsDraft, "renderedBody" | "stockImageUrl">>): void {
+export function updateNewsDraft(
+  id: number,
+  updates: Partial<Pick<NewsDraft, "title" | "excerpt" | "imageUrl" | "renderedBody" | "stockImageUrl" | "promoHtml" | "promoText" | "promoEntities" | "showSource">>,
+): void {
   const state = loadState();
   const draft = state.newsDrafts.find((item) => item.id === id);
   if (!draft) return;
@@ -215,6 +324,11 @@ export function replacePendingNewsHeadlines(
   return created;
 }
 
+export function getPendingNewsHeadlines(): PendingNewsHeadline[] {
+  const state = loadState();
+  return state.pendingNewsHeadlines;
+}
+
 export function getPendingNewsHeadlineById(id: number): PendingNewsHeadline | undefined {
   const state = loadState();
   return state.pendingNewsHeadlines.find((headline) => headline.id === id);
@@ -244,4 +358,216 @@ export function clearPendingNewsHeadlines(): number {
   state.pendingNewsHeadlines = [];
   saveState(state);
   return removed;
+}
+
+export function saveTestDraft(question: Question, explanation?: string): TestDraft | undefined {
+  const state = loadState();
+  const exists = state.testDrafts.find((draft) => draft.question.id === question.id);
+  if (exists) return undefined;
+
+  const draft: TestDraft = {
+    id: state.nextTestDraftId,
+    question,
+    explanation,
+    createdAt: new Date().toISOString(),
+    status: "draft",
+  };
+
+  state.testDrafts.push(draft);
+  state.nextTestDraftId += 1;
+  saveState(state);
+  return draft;
+}
+
+export function getTestDrafts(status: TestDraft["status"] = "draft"): TestDraft[] {
+  const state = loadState();
+  return state.testDrafts.filter((draft) => draft.status === status);
+}
+
+export function getAllTestDrafts(): TestDraft[] {
+  const state = loadState();
+  return state.testDrafts;
+}
+
+export function getTestDraftById(id: number): TestDraft | undefined {
+  const state = loadState();
+  return state.testDrafts.find((draft) => draft.id === id);
+}
+
+export function updateTestDraft(
+  id: number,
+  updates: Partial<Pick<TestDraft, "question" | "explanation" | "promoHtml" | "promoText" | "promoEntities">>,
+): TestDraft | undefined {
+  const state = loadState();
+  const draft = state.testDrafts.find((item) => item.id === id);
+  if (!draft) return undefined;
+  Object.assign(draft, updates);
+  saveState(state);
+  return draft;
+}
+
+export function updateTestDraftStatus(id: number, status: TestDraft["status"]): TestDraft | undefined {
+  const state = loadState();
+  const draft = state.testDrafts.find((item) => item.id === id);
+  if (!draft) return undefined;
+  draft.status = status;
+  saveState(state);
+  return draft;
+}
+
+export function clearTestDrafts(status: TestDraft["status"] = "draft"): number {
+  const state = loadState();
+  const before = state.testDrafts.length;
+  state.testDrafts = state.testDrafts.filter((draft) => draft.status !== status);
+  const removed = before - state.testDrafts.length;
+  saveState(state);
+  return removed;
+}
+
+export function saveForwardDraft(sourceChatId: number, sourceMessageId: number): ForwardDraft {
+  const state = loadState();
+  const existing = state.forwardDrafts.find(
+    (draft) => draft.sourceChatId === sourceChatId && draft.sourceMessageId === sourceMessageId,
+  );
+  if (existing) return existing;
+
+  const draft: ForwardDraft = {
+    id: state.nextForwardDraftId,
+    sourceChatId,
+    sourceMessageId,
+    createdAt: new Date().toISOString(),
+    status: "draft",
+  };
+
+  state.forwardDrafts.push(draft);
+  state.nextForwardDraftId += 1;
+  saveState(state);
+  return draft;
+}
+
+export function getForwardDrafts(status: ForwardDraft["status"] = "draft"): ForwardDraft[] {
+  const state = loadState();
+  return state.forwardDrafts.filter((draft) => draft.status === status);
+}
+
+export function getForwardDraftById(id: number): ForwardDraft | undefined {
+  const state = loadState();
+  return state.forwardDrafts.find((draft) => draft.id === id);
+}
+
+export function updateForwardDraftStatus(id: number, status: ForwardDraft["status"]): ForwardDraft | undefined {
+  const state = loadState();
+  const draft = state.forwardDrafts.find((item) => item.id === id);
+  if (!draft) return undefined;
+  draft.status = status;
+  saveState(state);
+  return draft;
+}
+
+export function clearForwardDrafts(status: ForwardDraft["status"] = "draft"): number {
+  const state = loadState();
+  const before = state.forwardDrafts.length;
+  state.forwardDrafts = state.forwardDrafts.filter((draft) => draft.status !== status);
+  const removed = before - state.forwardDrafts.length;
+  saveState(state);
+  return removed;
+}
+
+export function schedulePost(kind: ScheduledPost["kind"], targetId: number, runAt: string): ScheduledPost {
+  const state = loadState();
+  const scheduled: ScheduledPost = {
+    id: state.nextScheduledPostId,
+    kind,
+    targetId,
+    runAt,
+    createdAt: new Date().toISOString(),
+    status: "pending",
+  };
+  state.scheduledPosts.push(scheduled);
+  state.nextScheduledPostId += 1;
+  saveState(state);
+  return scheduled;
+}
+
+export function getScheduledPosts(status?: ScheduledPost["status"]): ScheduledPost[] {
+  const state = loadState();
+  if (!status) return state.scheduledPosts;
+  return state.scheduledPosts.filter((item) => item.status === status);
+}
+
+export function getScheduledPostById(id: number): ScheduledPost | undefined {
+  const state = loadState();
+  return state.scheduledPosts.find((item) => item.id === id);
+}
+
+export function updateScheduledPost(
+  id: number,
+  updates: Partial<Pick<ScheduledPost, "runAt" | "status" | "lastError">>,
+): ScheduledPost | undefined {
+  const state = loadState();
+  const scheduled = state.scheduledPosts.find((item) => item.id === id);
+  if (!scheduled) return undefined;
+  Object.assign(scheduled, updates);
+  saveState(state);
+  return scheduled;
+}
+
+export function cancelScheduledPost(id: number): ScheduledPost | undefined {
+  return updateScheduledPost(id, { status: "cancelled" });
+}
+
+export function getAdminSession(userId: number): AdminSession | undefined {
+  const state = loadState();
+  return state.adminSessions[String(userId)];
+}
+
+export function setAdminSession(session: AdminSession): void {
+  const state = loadState();
+  state.adminSessions[String(session.userId)] = session;
+  saveState(state);
+}
+
+export function clearAdminSession(userId: number): void {
+  const state = loadState();
+  delete state.adminSessions[String(userId)];
+  saveState(state);
+}
+
+export function getPromoTemplates(): PromoTemplate[] {
+  return loadState().promoTemplates.slice().sort((a, b) => a.slot - b.slot);
+}
+
+export function getPromoTemplate(slot: 1 | 2 | 3): PromoTemplate | undefined {
+  return loadState().promoTemplates.find((item) => item.slot === slot);
+}
+
+export function savePromoTemplate(
+  slot: 1 | 2 | 3,
+  label: string,
+  html: string,
+  options?: { text?: string; entities?: PromoTemplate["entities"] },
+): PromoTemplate {
+  const state = loadState();
+  const existing = state.promoTemplates.find((item) => item.slot === slot);
+  const template: PromoTemplate = {
+    slot,
+    label,
+    html,
+    text: options?.text,
+    entities: options?.entities,
+    updatedAt: new Date().toISOString(),
+  };
+  if (existing) {
+    Object.assign(existing, template);
+  } else {
+    state.promoTemplates.push(template);
+  }
+  saveState(state);
+  return template;
+}
+
+export function deletePromoTemplate(slot: 1 | 2 | 3): void {
+  const state = loadState();
+  state.promoTemplates = state.promoTemplates.filter((item) => item.slot !== slot);
+  saveState(state);
 }

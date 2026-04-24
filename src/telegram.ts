@@ -20,6 +20,8 @@ interface NewsTelegramPost {
   channelHandle?: string;
   previewLabel?: string;
   subscribeCta?: string;
+  promoHtml?: string;
+  showSource?: boolean;
   replyMarkup?: { inline_keyboard: Array<Array<{ text: string; callback_data?: string; url?: string }>> };
 }
 
@@ -72,42 +74,114 @@ export async function sendQuizToTelegram(
   botToken: string,
   chatId: string,
   question: Question,
+  promo?: { text?: string; entities?: TelegramMessageEntity[]; html?: string },
 ): Promise<number | undefined> {
   const correctIndex = question.answers.findIndex((a) => a.truth);
   const options = question.answers.map((a) => a.answer);
 
-  await sendPhoto(botToken, chatId, question);
+  await sendPhoto(botToken, chatId, question, promo?.html);
   return sendPoll(botToken, chatId, question, options, correctIndex);
 }
 
 const MAX_OPTION_LENGTH = 100;
 
-function formatCaption(question: Question): string {
+function escapeHtml(text: string): string {
+  return text.replace(/[&<>]/g, (c) => (c === "&" ? "&amp;" : c === "<" ? "&lt;" : "&gt;"));
+}
+
+export interface TelegramMessageEntity {
+  type: string;
+  offset: number;
+  length: number;
+  url?: string;
+  user?: { id: number };
+  language?: string;
+  custom_emoji_id?: string;
+}
+
+function entityTags(e: TelegramMessageEntity): { open: string; close: string } | null {
+  switch (e.type) {
+    case "bold":
+      return { open: "<b>", close: "</b>" };
+    case "italic":
+      return { open: "<i>", close: "</i>" };
+    case "underline":
+      return { open: "<u>", close: "</u>" };
+    case "strikethrough":
+      return { open: "<s>", close: "</s>" };
+    case "spoiler":
+      return { open: "<tg-spoiler>", close: "</tg-spoiler>" };
+    case "code":
+      return { open: "<code>", close: "</code>" };
+    case "pre":
+      return e.language
+        ? { open: `<pre><code class="language-${escapeHtml(e.language)}">`, close: "</code></pre>" }
+        : { open: "<pre>", close: "</pre>" };
+    case "blockquote":
+      return { open: "<blockquote>", close: "</blockquote>" };
+    case "expandable_blockquote":
+      return { open: "<blockquote expandable>", close: "</blockquote>" };
+    case "text_link":
+      return e.url ? { open: `<a href="${escapeHtml(e.url)}">`, close: "</a>" } : null;
+    case "text_mention":
+      return e.user ? { open: `<a href="tg://user?id=${e.user.id}">`, close: "</a>" } : null;
+    case "custom_emoji":
+      return e.custom_emoji_id
+        ? { open: `<tg-emoji emoji-id="${escapeHtml(e.custom_emoji_id)}">`, close: "</tg-emoji>" }
+        : null;
+    default:
+      return null;
+  }
+}
+
+export function entitiesToHtml(text: string, entities: TelegramMessageEntity[] = []): string {
+  if (!entities || entities.length === 0) return escapeHtml(text);
+  const openAt: string[][] = Array.from({ length: text.length + 1 }, () => []);
+  const closeAt: string[][] = Array.from({ length: text.length + 1 }, () => []);
+  const sorted = [...entities].sort((a, b) => a.offset - b.offset || b.length - a.length);
+  for (const e of sorted) {
+    const tags = entityTags(e);
+    if (!tags) continue;
+    openAt[e.offset]!.push(tags.open);
+    closeAt[e.offset + e.length]!.unshift(tags.close);
+  }
+  let out = "";
+  for (let i = 0; i <= text.length; i++) {
+    for (const c of closeAt[i]!) out += c;
+    for (const o of openAt[i]!) out += o;
+    if (i < text.length) out += escapeHtml(text[i]!);
+  }
+  return out;
+}
+
+function formatCaption(question: Question, promoHtml?: string): string {
   const hasLongOptions = question.answers.some((a) => a.answer.length > MAX_OPTION_LENGTH);
 
-  let caption = `📋 *${escapeMarkdown(question.id)}*\n*${escapeMarkdown(question.question)}*`;
+  let caption = `📋 <b>${escapeHtml(question.id)}</b>\n<b>${escapeHtml(question.question)}</b>`;
 
   if (hasLongOptions) {
     const optionsList = question.answers
-      .map((a, i) => `*${String.fromCharCode(65 + i)}\\.* ${escapeMarkdown(a.answer)}`)
+      .map((a, i) => `<b>${String.fromCharCode(65 + i)}.</b> ${escapeHtml(a.answer)}`)
       .join("\n\n");
     caption += `\n\n${optionsList}`;
   }
 
-  return caption;
-}
+  const trimmedPromo = promoHtml?.trim();
+  if (trimmedPromo) {
+    caption += `\n\n${trimmedPromo}`;
+  }
 
-function escapeMarkdown(text: string): string {
-  return text.replace(/([_*[\]()~`>#+\-=|{}.!])/g, "\\$1");
+  return caption;
 }
 
 async function sendPhoto(
   botToken: string,
   chatId: string,
   question: Question,
+  promoHtml?: string,
 ): Promise<void> {
   const url = `${TELEGRAM_API}/bot${botToken}/sendPhoto`;
-  const caption = formatCaption(question);
+  const caption = formatCaption(question, promoHtml);
 
   if (question.image) {
     const res = await fetch(url, {
@@ -117,10 +191,9 @@ async function sendPhoto(
         chat_id: chatId,
         photo: question.image,
         caption,
-        parse_mode: "MarkdownV2",
+        parse_mode: "HTML",
       }),
     });
-
     const result = (await res.json()) as TelegramResponse;
     if (!result.ok) {
       console.warn(`Failed to send photo: ${result.description}`);
@@ -132,7 +205,7 @@ async function sendPhoto(
   form.append("chat_id", chatId);
   form.append("photo", new Blob([readFileSync(NO_IMAGE_PATH)], { type: "image/png" }), "no_image.png");
   form.append("caption", caption);
-  form.append("parse_mode", "MarkdownV2");
+  form.append("parse_mode", "HTML");
 
   const res = await fetch(url, { method: "POST", body: form });
   const result = (await res.json()) as TelegramResponse;
@@ -206,27 +279,24 @@ export async function sendTextMessage(
   }
 }
 
-function escapeHtml(text: string): string {
-  return text
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
-}
-
 function convertEmphasis(text: string): string {
   return text
     .replace(/\*\*(.+?)\*\*/g, "<b>$1</b>")
     .replace(/\*(.+?)\*/g, "<b>$1</b>");
 }
 
-export function getNewsCaptionBodyLimit(post: Pick<NewsTelegramPost, "title" | "url" | "previewLabel" | "subscribeCta">): number {
-  const sourceLink = `🔗 <a href="${post.url}">Джерело</a>`;
+export function getNewsCaptionBodyLimit(post: Pick<NewsTelegramPost, "title" | "url" | "previewLabel" | "subscribeCta" | "promoHtml" | "showSource">): number {
+  const showSource = post.showSource !== false;
+  const sourceLink = showSource ? `🔗 <a href="${post.url}">Джерело</a>` : undefined;
   const subscribeLine = post.subscribeCta ? escapeHtml(post.subscribeCta) : undefined;
+  const promoLine = post.promoHtml?.trim() ? post.promoHtml.trim() : undefined;
   const suffix = [
     "",
     sourceLink,
     subscribeLine ? "" : undefined,
     subscribeLine,
+    promoLine ? "" : undefined,
+    promoLine,
   ].filter((line) => line !== undefined).join("\n");
 
   const header = [
@@ -240,14 +310,18 @@ export function getNewsCaptionBodyLimit(post: Pick<NewsTelegramPost, "title" | "
 
 function formatNewsCaption(post: NewsTelegramPost): string {
   const bodyHtml = convertEmphasis(escapeHtml(post.body));
-  const sourceLink = `🔗 <a href="${post.url}">Джерело</a>`;
+  const showSource = post.showSource !== false;
+  const sourceLink = showSource ? `🔗 <a href="${post.url}">Джерело</a>` : undefined;
   const subscribeLine = post.subscribeCta ? escapeHtml(post.subscribeCta) : undefined;
+  const promoLine = post.promoHtml?.trim() ? post.promoHtml.trim() : undefined;
 
   const suffix = [
     "",
     sourceLink,
     subscribeLine ? "" : undefined,
     subscribeLine,
+    promoLine ? "" : undefined,
+    promoLine,
   ].filter((l) => l !== undefined).join("\n");
 
   const header = [

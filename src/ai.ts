@@ -1,7 +1,7 @@
 const GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/models";
 const MODELS = ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.0-flash"];
 const OPENROUTER_BASE = "https://openrouter.ai/api/v1/chat/completions";
-const DEFAULT_OPENROUTER_MODELS = ["openai/gpt-4o-mini", "openrouter/auto"];
+const DEFAULT_OPENROUTER_MODELS = ["openai/gpt-4.1-mini", "openai/gpt-4o-mini", "openrouter/auto"];
 
 interface GeminiResponse {
   candidates?: Array<{
@@ -217,7 +217,8 @@ function hasCorruptedOutput(text: string): boolean {
   }
 
   const normalized = normalizeWhitespace(text);
-  const repeatedFragment = normalized.match(/(.{40,120}?)\1{1,}/u);
+  // Only flag clearly pathological repetitions (same 80+ char chunk repeated 2+ times).
+  const repeatedFragment = normalized.match(/(.{80,200}?)\1{2,}/u);
   return Boolean(repeatedFragment);
 }
 
@@ -374,6 +375,23 @@ async function generateAiText(
   return generateOpenRouterText(prompt, options);
 }
 
+async function generateAiTextOpenRouterFirst(
+  geminiApiKey: string | undefined,
+  prompt: string,
+  options: TextGenerationOptions = {},
+): Promise<string | undefined> {
+  const openRouterText = await generateOpenRouterText(prompt, options);
+  if (openRouterText) {
+    return openRouterText;
+  }
+
+  if (geminiApiKey?.trim()) {
+    return generateGeminiText(geminiApiKey, prompt, options);
+  }
+
+  return undefined;
+}
+
 async function generateAlternativeAiText(
   geminiApiKey: string | undefined,
   prompt: string,
@@ -424,27 +442,27 @@ export async function formatNewsPost(
   maxLength?: number,
 ): Promise<string> {
   const targetLength = maxLength ? `до ${maxLength} символів` : "600-1200 символів";
-  const prompt = `Ти редагуєш новину в короткий, щільний Telegram-пост для каналу про водіїв в Україні.
+  const prompt = `Ти редагуєш новину в Telegram-пост українською для каналу про авто й водіїв в Україні.
 
-Правила:
-- Пиши українською, коротко, предметно, без води.
-- Спирайся тільки на факти з наданого матеріалу. Нічого не вигадуй і не узагальнюй понад текст.
+Стиль поста:
+- Починай з емодзі, яке пасує темі, і короткого ліду (1-2 речення, що інтригують і одразу дають суть).
+- Далі 1-2 абзаци з деталями: факти, цифри, умови, причини, наслідки. Конкретика з матеріалу.
+- Можеш використати маркований список (• ) для переліку фактів чи кроків — 3-5 пунктів.
+- У фіналі коротке резюме або риторичне питання (1 рядок), прив'язане до фактів.
+- Виділяй ключові слова/фрази через **подвійні зірочки**.
+- Абзаци коротні (1-3 речення), щоб легко читалося з телефона.
+
+Жорсткі правила:
+- Пиши українською, живо, але без води і канцеляриту.
+- Спирайся ТІЛЬКИ на факти з матеріалу. Нічого не вигадуй. Не додавай фактів яких немає.
 - Довжина: ${targetLength}.
-- У першому абзаці одразу дай суть новини, без розгону.
-- Обов'язково включи 2-4 конкретні факти з тексту: дати, цифри, строки, прізвища, назви органів, умови, наслідки.
-- Якщо в тексті є лише один конкретний факт, не роздувай пост загальними міркуваннями.
-- Виділяй ключові факти подвійними зірочками: **ось так**.
-- Структура: 2-4 короткі абзаци або 1 абзац + короткий список.
-- Можна використовувати маркований список (• ) для переліку фактів.
-- Пояснюй, чому це важливо для водія, тільки якщо це прямо випливає з фактажу.
-- Заборонені фрази-пустушки: "це важливо знати", "варто стежити", "щоб бути в курсі", "автомобільна індустрія розвивається", "обговоримо у коментарях?" без конкретного контексту.
-- У фіналі можна дати 1 коротке запитання або висновок, але тільки прив'язаний до фактів новини.
-- Без хештегів. Без дати. Без сирих URL.
-- Не дублюй заголовок в тексті поста.
-- Текст має бути завершеним: без обірваних думок, без "далі", без натяку на продовження.
-- Якщо матеріал схожий на короткий тизер і фактів мало, поверни максимально чесний короткий пост без вигаданих деталей.
+- Не дублюй заголовок буквально в тексті.
+- Без хештегів, без дат у стилі "24.04.2026", без сирих URL.
+- Текст має бути завершеним — без "далі" чи натяків на продовження.
+- Уникай порожніх фраз "це важливо знати", "варто стежити", "автомобільна галузь розвивається".
+- Не пиши "Ось пост:" чи подібних метапояснень.
 
-Поверни тільки готовий текст, без заголовків на кшталт "Ось пост".
+Поверни ТІЛЬКИ готовий текст поста.
 
 Заголовок:
 ${title}
@@ -452,9 +470,9 @@ ${title}
 Матеріал:
 ${excerpt}`;
 
-  const result = await generateAiText(apiKey, prompt, {
-    maxTokens: Math.min(1200, Math.max(350, Math.ceil((maxLength ?? 900) / 2))),
-    temperature: 0.25,
+  const result = await generateAiTextOpenRouterFirst(apiKey, prompt, {
+    maxTokens: Math.min(2048, Math.max(800, Math.ceil((maxLength ?? 900) * 2))),
+    temperature: 0.3,
   });
 
   if (result && !isWeakNewsPost(result, excerpt)) {
@@ -466,14 +484,18 @@ ${excerpt}`;
   }
 
   const rescue = await generateAlternativeAiText(apiKey, buildRescueNewsPrompt(title, excerpt, targetLength), {
-    maxTokens: Math.min(1200, Math.max(350, Math.ceil((maxLength ?? 900) / 2))),
-    temperature: 0.2,
+    maxTokens: Math.min(2048, Math.max(800, Math.ceil((maxLength ?? 900) * 2))),
+    temperature: 0.25,
   });
 
-  if (rescue && !isWeakNewsPost(rescue, excerpt)) {
+  if (rescue) {
+    if (isWeakNewsPost(rescue, excerpt)) {
+      console.warn("AI rescue still weak, but accepting it over deterministic fallback");
+    }
     return rescue;
   }
 
+  console.warn("AI rescue returned nothing, using deterministic fallback");
   return buildFallbackNewsPost(excerpt, maxLength);
 }
 
@@ -499,7 +521,10 @@ ${title}
 Поточний пост:
 ${post}`;
 
-  const result = await generateAiText(apiKey, prompt, { maxTokens: Math.max(220, Math.ceil(maxLength / 2)), temperature: 0.15 });
+  const result = await generateAiTextOpenRouterFirst(apiKey, prompt, {
+    maxTokens: Math.min(2048, Math.max(600, maxLength * 2)),
+    temperature: 0.2,
+  });
   return result ?? buildFallbackNewsPost(post, maxLength);
 }
 
