@@ -1,7 +1,7 @@
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { Question } from "./scraper.js";
+import type { Question, RoadSignTheoryItem } from "./scraper.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const STATE_DIR = process.env.STATE_DIR ?? resolve(__dirname, "..");
@@ -91,6 +91,25 @@ export interface TikTokDraft {
   status: "draft" | "posted" | "rejected";
 }
 
+export interface RoadSignDraft {
+  id: number;
+  sign: RoadSignTheoryItem;
+  explanation: string;
+  promoHtml?: string;
+  promoText?: string;
+  promoEntities?: Array<{
+    type: string;
+    offset: number;
+    length: number;
+    url?: string;
+    language?: string;
+    custom_emoji_id?: string;
+    user?: { id: number };
+  }>;
+  createdAt: string;
+  status: "draft" | "posted" | "rejected";
+}
+
 export interface ScheduledPost {
   id: number;
   kind: "news" | "test" | "forward";
@@ -113,7 +132,8 @@ export interface AdminSession {
     | "schedule_test"
     | "schedule_forward"
     | "edit_tiktok_caption"
-    | "edit_tiktok_promo";
+    | "edit_tiktok_promo"
+    | "edit_sign_promo";
   targetId: number;
   createdAt: string;
 }
@@ -152,6 +172,8 @@ interface State {
   promoTemplates: PromoTemplate[];
   tiktokDrafts: TikTokDraft[];
   nextTikTokDraftId: number;
+  roadSignDrafts: RoadSignDraft[];
+  nextRoadSignDraftId: number;
 }
 
 function loadState(): State {
@@ -173,6 +195,8 @@ function loadState(): State {
       promoTemplates: [],
       tiktokDrafts: [],
       nextTikTokDraftId: 1,
+      roadSignDrafts: [],
+      nextRoadSignDraftId: 1,
     };
   }
 
@@ -196,6 +220,8 @@ function loadState(): State {
     promoTemplates: parsed.promoTemplates ?? [],
     tiktokDrafts: parsed.tiktokDrafts ?? [],
     nextTikTokDraftId: parsed.nextTikTokDraftId ?? 1,
+    roadSignDrafts: parsed.roadSignDrafts ?? [],
+    nextRoadSignDraftId: parsed.nextRoadSignDraftId ?? 1,
   };
 }
 
@@ -651,6 +677,61 @@ export function updateTikTokDraftStatus(
 ): TikTokDraft | undefined {
   const state = loadState();
   const draft = state.tiktokDrafts.find((item) => item.id === id);
+  if (!draft) return undefined;
+  draft.status = status;
+  saveState(state);
+  return draft;
+}
+
+export function saveRoadSignDraft(sign: RoadSignTheoryItem, explanation: string): RoadSignDraft | undefined {
+  const state = loadState();
+  const exists = state.roadSignDrafts.find((draft) => draft.sign.id === sign.id);
+  if (exists) return undefined;
+
+  const draft: RoadSignDraft = {
+    id: state.nextRoadSignDraftId,
+    sign,
+    explanation,
+    createdAt: new Date().toISOString(),
+    status: "draft",
+  };
+
+  state.roadSignDrafts.push(draft);
+  state.nextRoadSignDraftId += 1;
+  saveState(state);
+  return draft;
+}
+
+export function getRoadSignDrafts(status: RoadSignDraft["status"] = "draft"): RoadSignDraft[] {
+  const state = loadState();
+  return state.roadSignDrafts.filter((draft) => draft.status === status);
+}
+
+export function getAllRoadSignDrafts(): RoadSignDraft[] {
+  const state = loadState();
+  return state.roadSignDrafts;
+}
+
+export function getRoadSignDraftById(id: number): RoadSignDraft | undefined {
+  const state = loadState();
+  return state.roadSignDrafts.find((draft) => draft.id === id);
+}
+
+export function updateRoadSignDraft(
+  id: number,
+  updates: Partial<Pick<RoadSignDraft, "explanation" | "promoHtml" | "promoText" | "promoEntities">>,
+): RoadSignDraft | undefined {
+  const state = loadState();
+  const draft = state.roadSignDrafts.find((item) => item.id === id);
+  if (!draft) return undefined;
+  Object.assign(draft, updates);
+  saveState(state);
+  return draft;
+}
+
+export function updateRoadSignDraftStatus(id: number, status: RoadSignDraft["status"]): RoadSignDraft | undefined {
+  const state = loadState();
+  const draft = state.roadSignDrafts.find((item) => item.id === id);
   if (!draft) return undefined;
   draft.status = status;
   saveState(state);

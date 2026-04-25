@@ -435,6 +435,37 @@ ${explanation}`;
   return fallbackSummary || explanation;
 }
 
+export async function formatRoadSignExplanation(
+  apiKey: string | undefined,
+  signNumber: string,
+  signTitle: string,
+  explanation: string,
+): Promise<string> {
+  const prompt = `Ти готуєш коротке роз'яснення для рубрики про дорожні знаки.
+
+Знак: ${signNumber} — ${signTitle}
+
+Перепиши пояснення у форматі для Telegram:
+- 3-5 коротких речень
+- простою українською
+- без формату тесту (без "правильна відповідь", "варіант", "питання")
+- тільки факти з тексту
+- завершений і практичний тон
+
+Поверни тільки готовий текст.
+
+Пояснення:
+${explanation}`;
+
+  const result = await generateAiText(apiKey, prompt, { maxTokens: 420, temperature: 0.25 });
+  if (result && result.trim().length >= 60 && !hasCorruptedOutput(result)) {
+    return result.trim();
+  }
+
+  const fallback = splitIntoSentences(normalizeWhitespace(explanation)).slice(0, 4).join(" ").trim();
+  return fallback || normalizeWhitespace(explanation);
+}
+
 export async function formatNewsPost(
   apiKey: string | undefined,
   title: string,

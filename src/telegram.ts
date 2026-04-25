@@ -83,6 +83,65 @@ export async function sendQuizToTelegram(
   return sendPoll(botToken, chatId, question, options, correctIndex);
 }
 
+export async function sendRoadSignToTelegram(
+  botToken: string,
+  chatId: string,
+  post: {
+    imageUrl: string;
+    signNumber: string;
+    title: string;
+    explanation: string;
+    promoHtml?: string;
+    previewLabel?: string;
+    replyMarkup?: { inline_keyboard: Array<Array<{ text: string; callback_data?: string; url?: string }>> };
+  },
+): Promise<void> {
+  const url = `${TELEGRAM_API}/bot${botToken}/sendPhoto`;
+  const promoLine = post.promoHtml?.trim();
+  const header = [
+    post.previewLabel ? `<b>${escapeHtml(post.previewLabel)}</b>` : undefined,
+    `<b>🚸 Повторення дорожніх знаків</b>`,
+    `<b>Знак ${escapeHtml(post.signNumber)}</b>`,
+    `<b>${escapeHtml(post.title)}</b>`,
+  ].filter((line): line is string => Boolean(line)).join("\n");
+
+  const maxExplanationLength = promoLine ? 720 : 920;
+  const explanation = post.explanation.length > maxExplanationLength
+    ? `${post.explanation.slice(0, maxExplanationLength - 1).trimEnd()}…`
+    : post.explanation;
+
+  const caption = [
+    header,
+    "",
+    escapeHtml(explanation),
+    promoLine ? "" : undefined,
+    promoLine,
+  ].filter((line) => line !== undefined).join("\n");
+
+  // Download the image and send as binary to avoid Telegram failing to fetch external URLs
+  const imgResponse = await fetch(post.imageUrl);
+  if (!imgResponse.ok) throw new Error(`Failed to download sign image: ${imgResponse.status}`);
+  const imgBuffer = await imgResponse.arrayBuffer();
+  const contentType = imgResponse.headers.get("content-type") ?? "image/png";
+  const ext = contentType.includes("svg") ? "png" : (contentType.split("/")[1] ?? "png");
+
+  const form = new FormData();
+  form.append("chat_id", chatId);
+  form.append("photo", new Blob([imgBuffer], { type: "image/png" }), `sign.${ext}`);
+  form.append("caption", caption);
+  form.append("parse_mode", "HTML");
+  if (post.replyMarkup) {
+    form.append("reply_markup", JSON.stringify(post.replyMarkup));
+  }
+
+  const res = await fetch(url, { method: "POST", body: form });
+
+  const result = (await res.json()) as TelegramResponse;
+  if (!result.ok) {
+    throw new Error(`Telegram sendPhoto error: ${result.description}`);
+  }
+}
+
 const MAX_OPTION_LENGTH = 100;
 
 function escapeHtml(text: string): string {

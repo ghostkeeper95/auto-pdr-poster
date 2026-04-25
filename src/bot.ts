@@ -1,10 +1,10 @@
 import "dotenv/config";
 import * as chrono from "chrono-node";
 import { Bot, InlineKeyboard } from "grammy";
-import { extractImageKeywords, formatNewsPost, shortenNewsPost, summarizeExplanation } from "./ai.js";
+import { extractImageKeywords, formatNewsPost, formatRoadSignExplanation, shortenNewsPost, summarizeExplanation } from "./ai.js";
 import { searchStockImage } from "./images.js";
 import { buildBrandedImageUrl, fetchLatestNewsHeadlines, fetchNewsDraftFromHeadline, resolveNewsImageUrl } from "./news.js";
-import { fetchQuestionExplanation, fetchSectionQuestions, type Question } from "./scraper.js";
+import { fetchQuestionExplanation, fetchRoadSignTheorySection, fetchSectionQuestions, type Question, type RoadSignTheoryItem } from "./scraper.js";
 import {
   cancelScheduledPost,
   clearAdminSession,
@@ -24,6 +24,9 @@ import {
   getPromoTemplate,
   getPromoTemplates,
   getScheduledPosts,
+  getAllRoadSignDrafts,
+  getRoadSignDraftById,
+  getRoadSignDrafts,
   getTestDraftById,
   getTestDrafts,
   getTikTokDraftById,
@@ -36,6 +39,7 @@ import {
   saveForwardDraft,
   saveNewsDrafts,
   savePromoTemplate,
+  saveRoadSignDraft,
   saveTestDraft,
   saveTikTokDraft,
   schedulePost,
@@ -44,6 +48,8 @@ import {
   updateNewsDraft,
   updateNewsDraftStatus,
   updateScheduledPost,
+  updateRoadSignDraft,
+  updateRoadSignDraftStatus,
   updateTestDraft,
   updateTestDraftStatus,
   updateTikTokDraft,
@@ -51,10 +57,11 @@ import {
   type AdminSession,
   type ScheduledPost,
 } from "./state.js";
-import { entitiesToHtml, getLinkedChatId, getNewsCaptionBodyLimit, sendExplanationComment, sendNewsToTelegram, sendQuizToTelegram, sendVideoToTelegram, type TelegramMessageEntity } from "./telegram.js";
+import { entitiesToHtml, getLinkedChatId, getNewsCaptionBodyLimit, sendExplanationComment, sendNewsToTelegram, sendQuizToTelegram, sendRoadSignToTelegram, sendVideoToTelegram, type TelegramMessageEntity } from "./telegram.js";
 import { fetchTikTokInfo, isTikTokUrl } from "./tiktok.js";
 
 const TOTAL_SECTIONS = 71;
+const ROAD_SIGN_SECTION_IDS = ["33.1", "33.2", "33.3", "33.4", "33.5", "33.6", "33.7"] as const;
 const BATCH_POST_DELAY_MS = 3000;
 const SCHEDULER_INTERVAL_MS = 30_000;
 
@@ -165,6 +172,7 @@ function getMainMenuText(): string {
     "",
     `Новини: ${getNewsDrafts("draft").length} чернеток`,
     `Тести: ${getTestDrafts("draft").length} чернеток`,
+    `Знаки: ${getRoadSignDrafts("draft").length} чернеток`,
     `Форварди: ${getForwardDrafts("draft").length} чернеток`,
     `TikTok: ${getTikTokDrafts("draft").length} чернеток`,
     `Заплановано: ${getScheduledPosts("pending").length}`,
@@ -176,10 +184,12 @@ function getMainMenuKeyboard(): InlineKeyboard {
     .text("📝 Новини", "nav:news")
     .text("🎓 Тести", "nav:tests")
     .row()
+    .text("🚸 Знаки", "nav:signs")
+    .text("🎵 TikTok", "nav:tiktok")
+    .row()
     .text("📅 Розклад", "nav:schedule")
     .text("📥 Форварди", "nav:forwards")
     .row()
-    .text("🎵 TikTok", "nav:tiktok")
     .text("📢 Промо-шаблони", "nav:promo")
     .row()
     .text("↻ Оновити", "nav:main");
@@ -220,6 +230,24 @@ function getTestsMenuKeyboard(): InlineKeyboard {
   return new InlineKeyboard()
     .text("🆕 Новий тест", "test_generate")
     .text("📋 Чернетки", "test_drafts")
+    .row()
+    .text("⬅️ Назад", "nav:main");
+}
+
+function getSignsMenuText(): string {
+  return [
+    "🚸 Повторення дорожніх знаків",
+    "",
+    `Чернеток: ${getRoadSignDrafts("draft").length}`,
+    "",
+    "Рандомний знак береться з теорії ПДР: розділ 33.1–33.7.",
+  ].join("\n");
+}
+
+function getSignsMenuKeyboard(): InlineKeyboard {
+  return new InlineKeyboard()
+    .text("🆕 Новий знак", "sign_generate")
+    .text("📋 Чернетки", "sign_drafts")
     .row()
     .text("⬅️ Назад", "nav:main");
 }
@@ -428,6 +456,10 @@ async function showNewsMenu(ctx: any): Promise<void> {
 
 async function showTestsMenu(ctx: any): Promise<void> {
   await showMenu(ctx, getTestsMenuText(), getTestsMenuKeyboard());
+}
+
+async function showSignsMenu(ctx: any): Promise<void> {
+  await showMenu(ctx, getSignsMenuText(), getSignsMenuKeyboard());
 }
 
 async function showScheduleMenu(ctx: any): Promise<void> {
@@ -765,6 +797,152 @@ async function showTestDraftCard(ctx: any, draftId: number): Promise<void> {
     buildTestDraftActionsKeyboard(draftId),
     { parseMode: "HTML" },
   );
+}
+
+function buildRoadSignDraftActionsKeyboard(draftId: number): InlineKeyboard {
+  return new InlineKeyboard()
+    .text("👀 Прев'ю", `sign_preview:${draftId}`)
+    .text("📢 Реклама", `sign_promo_menu:${draftId}`)
+    .row()
+    .text("🚀 Опублікувати", `sign_publish:${draftId}`)
+    .text("🗑 Відхилити", `sign_reject:${draftId}`)
+    .row()
+    .text("⬅️ До знаків", "nav:signs");
+}
+
+function buildRoadSignPromoPickerKeyboard(draftId: number): InlineKeyboard {
+  const keyboard = new InlineKeyboard();
+  const templates = getPromoTemplates();
+  for (const template of templates) {
+    keyboard.text(`📢 ${template.slot}. ${truncatePreview(template.label, 24)}`, `sign_promo_apply:${draftId}:${template.slot}`).row();
+  }
+  keyboard.text("✍️ Ввести вручну", `sign_promo_manual:${draftId}`).row();
+  keyboard.text("🧹 Прибрати", `sign_promo_clear:${draftId}`).row();
+  keyboard.text("⬅️ До знаку", `sign_draft:${draftId}`);
+  return keyboard;
+}
+
+async function showRoadSignPromoPicker(ctx: any, draftId: number): Promise<void> {
+  const draft = getRoadSignDraftById(draftId);
+  if (!draft) {
+    await ctx.answerCallbackQuery({ text: "Чернетку не знайдено." });
+    return;
+  }
+
+  const templates = getPromoTemplates();
+  const lines = [`📢 Реклама для знаку #${draftId}`, ""];
+  if (templates.length === 0) {
+    lines.push("Немає збережених шаблонів. Створи їх у головному меню → Промо-шаблони,");
+    lines.push("або введи рекламу вручну.");
+  } else {
+    lines.push("Обери шаблон або введи вручну:");
+    for (const template of templates) {
+      lines.push(`• ${template.slot}. ${template.label}`);
+    }
+  }
+  if (draft.promoHtml?.trim()) {
+    lines.push("", "Поточна реклама:", truncatePreview(stripHtmlForPreview(draft.promoHtml), 120));
+  }
+  await showMenu(ctx, lines.join("\n"), buildRoadSignPromoPickerKeyboard(draftId));
+}
+
+async function showRoadSignDraftCard(ctx: any, draftId: number): Promise<void> {
+  const draft = getRoadSignDraftById(draftId);
+  if (!draft) {
+    await ctx.reply("❌ Чернетку знаку не знайдено.");
+    return;
+  }
+
+  const lines = [
+    `🚸 Знак #${draft.id}`,
+    "",
+    `Знак ${draft.sign.signNumber}`,
+    `${draft.sign.signNumber} — ${draft.sign.title}`,
+    "",
+    truncate(draft.explanation, 500),
+  ];
+  if (draft.promoHtml?.trim()) {
+    lines.push("", "📢 Реклама:", truncatePreview(stripHtmlForPreview(draft.promoHtml), 120));
+  }
+
+  await showMenu(ctx, lines.join("\n"), buildRoadSignDraftActionsKeyboard(draftId));
+}
+
+async function showRoadSignDraftList(ctx: any): Promise<void> {
+  const drafts = getRoadSignDrafts("draft").slice(-10).reverse();
+  const keyboard = new InlineKeyboard();
+  for (const draft of drafts) {
+    keyboard.text(truncate(`#${draft.id} ${draft.sign.signNumber} ${draft.sign.title}`, 40), `sign_draft:${draft.id}`).row();
+  }
+  keyboard.text("⬅️ До знаків", "nav:signs");
+
+  const text = drafts.length === 0
+    ? "🚸 Чернеток знаків поки немає."
+    : [
+      "🚸 Чернетки дорожніх знаків",
+      "",
+      ...drafts.map((draft) => `#${draft.id} · ${draft.sign.signNumber} — ${truncate(draft.sign.title, 70)}`),
+    ].join("\n");
+
+  await showMenu(ctx, text, keyboard);
+}
+
+async function publishRoadSignDraft(draftId: number, destinationChatId = CHANNEL_CHAT_ID): Promise<string> {
+  const draft = getRoadSignDraftById(draftId);
+  if (!draft) throw new Error("Чернетку знаку не знайдено.");
+  if (!draft.sign.imageUrl) throw new Error("У цього знаку немає зображення.");
+
+  const previewReplyMarkup = destinationChatId === CHANNEL_CHAT_ID
+    ? undefined
+    : { inline_keyboard: buildRoadSignDraftActionsKeyboard(draftId).inline_keyboard };
+
+  await sendRoadSignToTelegram(BOT_TOKEN, String(destinationChatId), {
+    imageUrl: draft.sign.imageUrl,
+    signNumber: draft.sign.signNumber,
+    title: draft.sign.title,
+    explanation: draft.explanation,
+    promoHtml: draft.promoHtml,
+    previewLabel: destinationChatId === CHANNEL_CHAT_ID ? undefined : "ПРЕВ'Ю",
+    replyMarkup: previewReplyMarkup,
+  });
+
+  if (destinationChatId === CHANNEL_CHAT_ID) {
+    markPosted(draft.sign.id);
+    updateRoadSignDraftStatus(draftId, "posted");
+    return `✅ Знак ${draftId} опубліковано.`;
+  }
+
+  return `👀 Прев'ю знаку ${draftId} надіслано.`;
+}
+
+async function pickRandomRoadSign(): Promise<{ sign: RoadSignTheoryItem; explanation: string } | undefined> {
+  const existingIds = new Set(getAllRoadSignDrafts().map((draft) => draft.sign.id));
+  const shuffled = [...ROAD_SIGN_SECTION_IDS].sort(() => Math.random() - 0.5);
+
+  for (const sectionId of shuffled) {
+    const signs = await fetchRoadSignTheorySection(sectionId);
+    const candidates = signs.filter((sign) => !isPosted(sign.id) && !existingIds.has(sign.id));
+    if (candidates.length === 0) continue;
+
+    const sign = candidates[Math.floor(Math.random() * candidates.length)]!;
+    const explanation = await formatRoadSignExplanation(
+      process.env.GEMINI_API_KEY,
+      sign.signNumber,
+      sign.title,
+      sign.explanation,
+    ).catch(() => sign.explanation);
+    return { sign, explanation };
+  }
+
+  return undefined;
+}
+
+async function generateRoadSignDraft() {
+  const picked = await pickRandomRoadSign();
+  if (!picked) throw new Error("Не знайшов нових знаків у секціях 33.1–33.7.");
+  const draft = saveRoadSignDraft(picked.sign, picked.explanation);
+  if (!draft) throw new Error("Цей знак уже є в чернетках.");
+  return draft;
 }
 
 async function ensureRenderedBody(
@@ -1222,6 +1400,30 @@ async function handleSessionInput(ctx: any, text: string): Promise<boolean> {
       await showTikTokDraftCard(ctx, session.targetId);
       return true;
     }
+    case "edit_sign_promo": {
+      const signDraft = getRoadSignDraftById(session.targetId);
+      if (!signDraft) {
+        clearAdminSession(ctx.from.id);
+        await ctx.reply("❌ Чернетку знаку не знайдено.");
+        return true;
+      }
+      const clear = text.trim() === "—" || text.trim() === "-" || text.trim().toLowerCase() === "clear";
+      if (clear) {
+        updateRoadSignDraft(session.targetId, { promoHtml: undefined, promoText: undefined, promoEntities: undefined });
+        clearAdminSession(ctx.from.id);
+        await ctx.reply(`🧹 Рекламу для знаку #${session.targetId} прибрано.`);
+        await showRoadSignDraftCard(ctx, session.targetId);
+        return true;
+      }
+      const entities = (ctx.msg?.entities ?? ctx.msg?.caption_entities ?? []) as TelegramMessageEntity[];
+      const rawText = (ctx.msg?.text ?? ctx.msg?.caption ?? text) as string;
+      const promoHtml = entitiesToHtml(rawText, entities);
+      updateRoadSignDraft(session.targetId, { promoHtml, promoText: rawText, promoEntities: entities });
+      clearAdminSession(ctx.from.id);
+      await ctx.reply(`✅ Рекламу для знаку #${session.targetId} збережено.`);
+      await showRoadSignDraftCard(ctx, session.targetId);
+      return true;
+    }
     case "edit_promo_template": {
       const slot = session.targetId as 1 | 2 | 3;
       const clear = text.trim() === "—" || text.trim() === "-" || text.trim().toLowerCase() === "clear";
@@ -1280,6 +1482,9 @@ async function handleNavCallback(ctx: any, target: string): Promise<void> {
       return;
     case "tests":
       await showTestsMenu(ctx);
+      return;
+    case "signs":
+      await showSignsMenu(ctx);
       return;
     case "schedule":
       await showScheduleMenu(ctx);
@@ -1642,6 +1847,113 @@ bot.on("callback_query:data", async (ctx) => {
     updateTestDraft(draftId, { promoHtml: undefined, promoText: undefined, promoEntities: undefined });
     await ctx.answerCallbackQuery({ text: "Прибрано" });
     await showTestDraftCard(ctx, draftId);
+    return;
+  }
+
+  if (data === "sign_generate") {
+    try {
+      const draft = await generateRoadSignDraft();
+      await ctx.answerCallbackQuery({ text: "Створено" });
+      await ctx.reply(`✅ Створив чернетку знаку ${draft.id}.`);
+      await showRoadSignDraftCard(ctx, draft.id);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      await ctx.answerCallbackQuery({ text: message });
+      await ctx.reply(`❌ ${message}`);
+    }
+    return;
+  }
+
+  if (data === "sign_drafts") {
+    await showRoadSignDraftList(ctx);
+    return;
+  }
+
+  if (data.startsWith("sign_draft:")) {
+    await showRoadSignDraftCard(ctx, Number(data.split(":")[1]));
+    return;
+  }
+
+  if (data.startsWith("sign_preview:")) {
+    try {
+      const draftId = Number(data.split(":")[1]);
+      const chatId = ctx.chat?.id;
+      if (!chatId) {
+        await ctx.answerCallbackQuery({ text: "Чат не знайдено." });
+        return;
+      }
+      const result = await publishRoadSignDraft(draftId, String(chatId));
+      await ctx.answerCallbackQuery({ text: "Прев'ю надіслано" });
+      await ctx.reply(result, { reply_markup: buildRoadSignDraftActionsKeyboard(draftId) });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      await ctx.answerCallbackQuery({ text: message });
+      await ctx.reply(`❌ ${message}`);
+    }
+    return;
+  }
+
+  if (data.startsWith("sign_publish:")) {
+    try {
+      const result = await publishRoadSignDraft(Number(data.split(":")[1]));
+      await ctx.answerCallbackQuery({ text: "Опубліковано" });
+      await ctx.reply(result);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      await ctx.answerCallbackQuery({ text: message });
+      await ctx.reply(`❌ ${message}`);
+    }
+    return;
+  }
+
+  if (data.startsWith("sign_promo_menu:")) {
+    const draftId = Number(data.split(":")[1]);
+    await showRoadSignPromoPicker(ctx, draftId);
+    return;
+  }
+
+  if (data.startsWith("sign_promo_apply:")) {
+    const [, draftIdRaw, slotRaw] = data.split(":");
+    const draftId = Number(draftIdRaw);
+    const slot = Number(slotRaw) as 1 | 2 | 3;
+    const template = getPromoTemplate(slot);
+    if (!template) {
+      await ctx.answerCallbackQuery({ text: "Шаблон порожній" });
+      return;
+    }
+    updateRoadSignDraft(draftId, {
+      promoHtml: template.html,
+      promoText: template.text,
+      promoEntities: template.entities,
+    });
+    await ctx.answerCallbackQuery({ text: `Застосовано: ${template.label}` });
+    await showRoadSignDraftCard(ctx, draftId);
+    return;
+  }
+
+  if (data.startsWith("sign_promo_manual:")) {
+    const draftId = Number(data.split(":")[1]);
+    setAdminSession({ userId: ctx.from.id, mode: "edit_sign_promo", targetId: draftId, createdAt: new Date().toISOString() });
+    await ctx.answerCallbackQuery();
+    await ctx.reply(
+      `📢 Надішли текст реклами для знаку #${draftId}.\n• Форматування (жирний, курсив, посилання, емодзі) зберігається.\n• Надішли «—» щоб прибрати.\n• /cancel — скасувати.`,
+    );
+    return;
+  }
+
+  if (data.startsWith("sign_promo_clear:")) {
+    const draftId = Number(data.split(":")[1]);
+    updateRoadSignDraft(draftId, { promoHtml: undefined, promoText: undefined, promoEntities: undefined });
+    await ctx.answerCallbackQuery({ text: "Прибрано" });
+    await showRoadSignDraftCard(ctx, draftId);
+    return;
+  }
+
+  if (data.startsWith("sign_reject:")) {
+    const draftId = Number(data.split(":")[1]);
+    updateRoadSignDraftStatus(draftId, "rejected");
+    await ctx.answerCallbackQuery({ text: "Відхилено" });
+    await ctx.reply(`🗑 Знак ${draftId} відхилено.`);
     return;
   }
 
