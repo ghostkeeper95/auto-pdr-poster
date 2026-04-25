@@ -4,11 +4,12 @@ import { Bot, InlineKeyboard } from "grammy";
 import { extractImageKeywords, formatNewsPost, formatRoadSignExplanation, shortenNewsPost, summarizeExplanation } from "./ai.js";
 import { searchStockImage } from "./images.js";
 import { buildBrandedImageUrl, fetchLatestNewsHeadlines, fetchNewsDraftFromHeadline, resolveNewsImageUrl } from "./news.js";
-import { fetchQuestionExplanation, fetchRoadSignTheorySection, fetchSectionQuestions, type Question, type RoadSignTheoryItem } from "./scraper.js";
+import { fetchGreenWayExpertComment, fetchQuestionExplanation, fetchRoadSignTheorySection, fetchSectionQuestions, type Question, type RoadSignTheoryItem } from "./scraper.js";
 import {
   cancelScheduledPost,
   clearAdminSession,
   clearNewsDrafts,
+  clearRoadSignDrafts,
   clearPendingNewsHeadlines,
   deletePromoTemplate,
   getAdminSession,
@@ -248,6 +249,8 @@ function getSignsMenuKeyboard(): InlineKeyboard {
   return new InlineKeyboard()
     .text("🆕 Новий знак", "sign_generate")
     .text("📋 Чернетки", "sign_drafts")
+    .row()
+    .text("🧹 Очистити", "sign_clear")
     .row()
     .text("⬅️ Назад", "nav:main");
 }
@@ -848,7 +851,7 @@ async function showRoadSignPromoPicker(ctx: any, draftId: number): Promise<void>
 
 async function showRoadSignDraftCard(ctx: any, draftId: number): Promise<void> {
   const draft = getRoadSignDraftById(draftId);
-  if (!draft) {
+  if (!draft || !draft.sign?.signNumber) {
     await ctx.reply("❌ Чернетку знаку не знайдено.");
     return;
   }
@@ -869,7 +872,7 @@ async function showRoadSignDraftCard(ctx: any, draftId: number): Promise<void> {
 }
 
 async function showRoadSignDraftList(ctx: any): Promise<void> {
-  const drafts = getRoadSignDrafts("draft").slice(-10).reverse();
+  const drafts = getRoadSignDrafts("draft").filter((d) => d.sign?.signNumber).slice(-10).reverse();
   const keyboard = new InlineKeyboard();
   for (const draft of drafts) {
     keyboard.text(truncate(`#${draft.id} ${draft.sign.signNumber} ${draft.sign.title}`, 40), `sign_draft:${draft.id}`).row();
@@ -890,14 +893,16 @@ async function showRoadSignDraftList(ctx: any): Promise<void> {
 async function publishRoadSignDraft(draftId: number, destinationChatId = CHANNEL_CHAT_ID): Promise<string> {
   const draft = getRoadSignDraftById(draftId);
   if (!draft) throw new Error("Чернетку знаку не знайдено.");
-  if (!draft.sign.imageUrl) throw new Error("У цього знаку немає зображення.");
+  const imageUrls = draft.sign.imageUrls?.filter(Boolean) ?? [];
+  if (!draft.sign.imageUrl && imageUrls.length === 0) throw new Error("У цього знаку немає зображення.");
 
   const previewReplyMarkup = destinationChatId === CHANNEL_CHAT_ID
     ? undefined
     : { inline_keyboard: buildRoadSignDraftActionsKeyboard(draftId).inline_keyboard };
 
   await sendRoadSignToTelegram(BOT_TOKEN, String(destinationChatId), {
-    imageUrl: draft.sign.imageUrl,
+    imageUrl: draft.sign.imageUrl || imageUrls[0]!,
+    imageUrls,
     signNumber: draft.sign.signNumber,
     title: draft.sign.title,
     explanation: draft.explanation,
@@ -917,6 +922,7 @@ async function publishRoadSignDraft(draftId: number, destinationChatId = CHANNEL
 
 async function pickRandomRoadSign(): Promise<{ sign: RoadSignTheoryItem; explanation: string } | undefined> {
   const existingIds = new Set(getAllRoadSignDrafts().map((draft) => draft.sign.id));
+
   const shuffled = [...ROAD_SIGN_SECTION_IDS].sort(() => Math.random() - 0.5);
 
   for (const sectionId of shuffled) {
@@ -925,12 +931,17 @@ async function pickRandomRoadSign(): Promise<{ sign: RoadSignTheoryItem; explana
     if (candidates.length === 0) continue;
 
     const sign = candidates[Math.floor(Math.random() * candidates.length)]!;
+    const sourceExplanation = await fetchGreenWayExpertComment(sign.signNumber, sign.section)
+      .catch(() => undefined)
+      .then((expertComment) => expertComment ?? sign.explanation);
+
     const explanation = await formatRoadSignExplanation(
       process.env.GEMINI_API_KEY,
       sign.signNumber,
       sign.title,
-      sign.explanation,
-    ).catch(() => sign.explanation);
+      sourceExplanation,
+    ).catch(() => sourceExplanation);
+
     return { sign, explanation };
   }
 
@@ -1866,6 +1877,14 @@ bot.on("callback_query:data", async (ctx) => {
 
   if (data === "sign_drafts") {
     await showRoadSignDraftList(ctx);
+    return;
+  }
+
+  if (data === "sign_clear") {
+    const cleared = clearRoadSignDrafts("draft");
+    await ctx.answerCallbackQuery({ text: "Очищено" });
+    await ctx.reply(`🧹 Очищено чернетки знаків: ${cleared}.`);
+    await showSignsMenu(ctx);
     return;
   }
 

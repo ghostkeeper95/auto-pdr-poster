@@ -737,3 +737,12 @@ export function updateRoadSignDraftStatus(id: number, status: RoadSignDraft["sta
   saveState(state);
   return draft;
 }
+
+export function clearRoadSignDrafts(status: RoadSignDraft["status"] = "draft"): number {
+  const state = loadState();
+  const before = state.roadSignDrafts.length;
+  state.roadSignDrafts = state.roadSignDrafts.filter((draft) => draft.status !== status);
+  const removed = before - state.roadSignDrafts.length;
+  saveState(state);
+  return removed;
+}

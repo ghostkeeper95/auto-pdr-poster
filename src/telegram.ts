@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import sharp from "sharp";
 import type { Question } from "./scraper.js";
 
 const TELEGRAM_API = "https://api.telegram.org";
@@ -83,11 +84,68 @@ export async function sendQuizToTelegram(
   return sendPoll(botToken, chatId, question, options, correctIndex);
 }
 
+function toTelegramImageSourceUrl(imageUrl: string): string {
+  return imageUrl.endsWith(".svg")
+    ? `https://images.weserv.nl/?url=${encodeURIComponent(imageUrl.replace(/^https?:\/\//, ""))}&output=png&w=1024`
+    : imageUrl;
+}
+
+async function downloadPngBuffer(imageUrl: string): Promise<Buffer> {
+  const sourceUrl = toTelegramImageSourceUrl(imageUrl);
+  const response = await fetch(sourceUrl);
+  if (!response.ok) {
+    throw new Error(`Failed to download sign image: ${response.status}`);
+  }
+
+  const binary = Buffer.from(await response.arrayBuffer());
+  return sharp(binary).flatten({ background: "#ffffff" }).png().toBuffer();
+}
+
+async function buildRoadSignCompositeImage(imageUrls: string[]): Promise<Buffer> {
+  const rawBuffers = await Promise.all(imageUrls.map((imageUrl) => downloadPngBuffer(imageUrl)));
+  const tileSize = 360;
+  const padding = 18;
+  const columns = imageUrls.length <= 2 ? 2 : imageUrls.length <= 4 ? 2 : imageUrls.length <= 6 ? 3 : 4;
+  const rows = Math.ceil(rawBuffers.length / columns);
+
+  const normalized = await Promise.all(
+    rawBuffers.map((buffer) => sharp(buffer)
+      .resize(tileSize, tileSize, { fit: "contain", background: "#ffffff" })
+      .png()
+      .toBuffer()),
+  );
+
+  const width = columns * tileSize + (columns + 1) * padding;
+  const height = rows * tileSize + (rows + 1) * padding;
+  const composites = normalized.map((buffer, index) => {
+    const row = Math.floor(index / columns);
+    const col = index % columns;
+    return {
+      input: buffer,
+      left: padding + col * (tileSize + padding),
+      top: padding + row * (tileSize + padding),
+    };
+  });
+
+  return sharp({
+    create: {
+      width,
+      height,
+      channels: 3,
+      background: "#f6f7fb",
+    },
+  })
+    .composite(composites)
+    .png()
+    .toBuffer();
+}
+
 export async function sendRoadSignToTelegram(
   botToken: string,
   chatId: string,
   post: {
     imageUrl: string;
+    imageUrls?: string[];
     signNumber: string;
     title: string;
     explanation: string;
@@ -118,27 +176,52 @@ export async function sendRoadSignToTelegram(
     promoLine,
   ].filter((line) => line !== undefined).join("\n");
 
-  // Download the image and send as binary to avoid Telegram failing to fetch external URLs
-  const imgResponse = await fetch(post.imageUrl);
-  if (!imgResponse.ok) throw new Error(`Failed to download sign image: ${imgResponse.status}`);
-  const imgBuffer = await imgResponse.arrayBuffer();
-  const contentType = imgResponse.headers.get("content-type") ?? "image/png";
-  const ext = contentType.includes("svg") ? "png" : (contentType.split("/")[1] ?? "png");
-
-  const form = new FormData();
-  form.append("chat_id", chatId);
-  form.append("photo", new Blob([imgBuffer], { type: "image/png" }), `sign.${ext}`);
-  form.append("caption", caption);
-  form.append("parse_mode", "HTML");
-  if (post.replyMarkup) {
-    form.append("reply_markup", JSON.stringify(post.replyMarkup));
+  const imageCandidates = Array.from(new Set([post.imageUrl, ...(post.imageUrls ?? [])].filter(Boolean)));
+  if (imageCandidates.length === 0) {
+    throw new Error("Road sign post has no images.");
   }
 
-  const res = await fetch(url, { method: "POST", body: form });
+  const sendImageBuffer = async (
+    imageBuffer: Buffer,
+    options?: { caption?: string; replyMarkup?: { inline_keyboard: Array<Array<{ text: string; callback_data?: string; url?: string }>> } },
+  ): Promise<void> => {
+    const form = new FormData();
+    form.append("chat_id", chatId);
+    form.append("photo", new Blob([imageBuffer], { type: "image/png" }), "sign.png");
+    if (options?.caption) {
+      form.append("caption", options.caption);
+      form.append("parse_mode", "HTML");
+    }
+    if (options?.replyMarkup) {
+      form.append("reply_markup", JSON.stringify(options.replyMarkup));
+    }
 
-  const result = (await res.json()) as TelegramResponse;
-  if (!result.ok) {
-    throw new Error(`Telegram sendPhoto error: ${result.description}`);
+    const res = await fetch(url, { method: "POST", body: form });
+    const result = (await res.json()) as TelegramResponse;
+    if (!result.ok) {
+      throw new Error(`Telegram sendPhoto error: ${result.description}`);
+    }
+  };
+
+  if (imageCandidates.length > 1) {
+    try {
+      const collage = await buildRoadSignCompositeImage(imageCandidates);
+      await sendImageBuffer(collage, { caption, replyMarkup: post.replyMarkup });
+      return;
+    } catch (error) {
+      console.warn("Failed to build/send sign collage, falling back to per-image sending:", error);
+    }
+  }
+
+  const firstImageBuffer = await downloadPngBuffer(imageCandidates[0]!);
+  await sendImageBuffer(firstImageBuffer, { caption, replyMarkup: post.replyMarkup });
+  for (const extraImage of imageCandidates.slice(1)) {
+    try {
+      const extraImageBuffer = await downloadPngBuffer(extraImage);
+      await sendImageBuffer(extraImageBuffer);
+    } catch (error) {
+      console.warn(`Failed to send extra sign image (${extraImage}):`, error);
+    }
   }
 }
 
