@@ -1221,7 +1221,10 @@ async function pickRandomQuestion(): Promise<{ question: Question; explanation?:
     const question = unposted[Math.floor(Math.random() * unposted.length)];
     const rawExplanation = await fetchQuestionExplanation(question.id);
     const explanation = rawExplanation
-      ? await summarizeExplanation(process.env.GEMINI_API_KEY, rawExplanation).catch(() => rawExplanation)
+      ? await summarizeExplanation(process.env.GEMINI_API_KEY, rawExplanation, {
+        question: question.question,
+        answers: question.answers,
+      }).catch(() => rawExplanation)
       : undefined;
     return { question, explanation };
   }

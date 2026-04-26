@@ -92,6 +92,10 @@ export async function postQuestions(count: number, externalOffset?: number): Pro
               explanationText = await summarizeExplanation(
                 aiApiKey,
                 explanationText,
+                {
+                  question: question.question,
+                  answers: question.answers,
+                },
               );
             }
             await sendExplanationComment(

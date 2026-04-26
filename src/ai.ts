@@ -22,6 +22,16 @@ interface TextGenerationOptions {
   temperature?: number;
 }
 
+interface ExplanationAnswerOption {
+  answer: string;
+  truth: boolean;
+}
+
+interface ExplanationSummaryContext {
+  question?: string;
+  answers?: ExplanationAnswerOption[];
+}
+
 function normalizeWhitespace(text: string): string {
   return text.replace(/\s+/g, " ").trim();
 }
@@ -38,7 +48,69 @@ function hasUnbalancedQuotes(text: string): boolean {
   return quoteCount % 2 === 1;
 }
 
-function buildFallbackExplanationSummary(explanation: string): string {
+function ensureSentence(text: string): string {
+  const normalized = normalizeWhitespace(text);
+  if (!normalized) {
+    return "";
+  }
+
+  if (/[.!?…]$/u.test(normalized)) {
+    return normalized;
+  }
+
+  return `${normalized}.`;
+}
+
+function hasPdrReference(text: string): boolean {
+  return /\b(п\.?\s*\d+(?:\.\d+)*|пункт(ом|у)?|пдр|у джерелі не вказано конкретний пункт пдр)\b/iu.test(text);
+}
+
+function formatAnswerOption(index: number, answer: string): string {
+  const letter = String.fromCharCode(65 + index);
+  return `${letter}. ${normalizeWhitespace(answer)}`;
+}
+
+function getCorrectAnswerLabel(context?: ExplanationSummaryContext): string | undefined {
+  const answers = context?.answers;
+  if (!answers || answers.length === 0) {
+    return undefined;
+  }
+
+  const index = answers.findIndex((answer) => answer.truth);
+  if (index < 0) {
+    return undefined;
+  }
+
+  return formatAnswerOption(index, answers[index]!.answer);
+}
+
+function buildExplanationContextBlock(context: ExplanationSummaryContext | undefined, correctAnswer: string | undefined): string {
+  const parts: string[] = [];
+
+  if (context?.question) {
+    parts.push(`Питання: ${normalizeWhitespace(context.question)}`);
+  }
+
+  const answers = context?.answers
+    ?.map((answer, index) => formatAnswerOption(index, answer.answer))
+    .filter(Boolean);
+
+  if (answers && answers.length > 0) {
+    parts.push(`Варіанти: ${answers.join(" | ")}`);
+  }
+
+  if (correctAnswer) {
+    parts.push(`Еталон правильної відповіді: ${correctAnswer}`);
+  }
+
+  if (parts.length === 0) {
+    return "";
+  }
+
+  return `\n\nКонтекст питання:\n${parts.join("\n")}`;
+}
+
+function buildFallbackExplanationSummary(explanation: string, correctAnswer?: string): string {
   const paragraphs = explanation
     .split(/\n\s*\n/)
     .map((paragraph) => normalizeWhitespace(paragraph))
@@ -46,7 +118,13 @@ function buildFallbackExplanationSummary(explanation: string): string {
 
   const sentences = splitIntoSentences(paragraphs.join(" "));
   if (sentences.length === 0) {
-    return normalizeWhitespace(explanation);
+    const base = normalizeWhitespace(explanation);
+    const withAnswer = correctAnswer
+      ? `${ensureSentence(`Правильна відповідь: ${correctAnswer}`)} ${base}`.trim()
+      : base;
+    return hasPdrReference(withAnswer)
+      ? withAnswer
+      : `${withAnswer} У джерелі не вказано конкретний пункт ПДР.`.trim();
   }
 
   const selected: string[] = [];
@@ -77,7 +155,14 @@ function buildFallbackExplanationSummary(explanation: string): string {
     }
   }
 
-  const summary = selected.slice(0, 3).join(" ").trim();
+  const baseSummary = selected.slice(0, 3).join(" ").trim();
+  const withAnswer = correctAnswer
+    ? `${ensureSentence(`Правильна відповідь: ${correctAnswer}`)} ${baseSummary}`.trim()
+    : baseSummary;
+  const summary = hasPdrReference(withAnswer)
+    ? withAnswer
+    : `${withAnswer} У джерелі не вказано конкретний пункт ПДР.`.trim();
+
   if (summary.length <= 650) {
     return summary;
   }
@@ -96,7 +181,7 @@ function buildFallbackExplanationSummary(explanation: string): string {
   return `${truncated.trim()}…`;
 }
 
-function isWeakExplanationSummary(summary: string, explanation: string): boolean {
+function isWeakExplanationSummary(summary: string, explanation: string, correctAnswer?: string): boolean {
   const normalizedSummary = normalizeWhitespace(summary);
   const normalizedExplanation = normalizeWhitespace(explanation);
   const summarySentences = splitIntoSentences(normalizedSummary);
@@ -122,6 +207,32 @@ function isWeakExplanationSummary(summary: string, explanation: string): boolean
   }
 
   if (normalizedExplanation.length >= 240 && summarySentences.length < 2) {
+    return true;
+  }
+
+  if (correctAnswer) {
+    const normalizedCorrect = normalizeWhitespace(correctAnswer);
+    const letterMatch = normalizedCorrect.match(/^([A-ZА-ЯІЇЄҐ])\./u);
+    const letter = letterMatch?.[1];
+    const answerCore = normalizedCorrect.replace(/^[A-ZА-ЯІЇЄҐ]\.\s*/u, "");
+    const strongWords = answerCore
+      .toLowerCase()
+      .split(/\s+/)
+      .map((word) => word.replace(/[^\p{L}\p{N}-]/gu, ""))
+      .filter((word) => word.length >= 4)
+      .slice(0, 3);
+
+    const hasLetter = letter ? new RegExp(`\\b${letter}\\.?\\b`, "u").test(normalizedSummary) : false;
+    const hasWord = strongWords.length === 0
+      ? normalizedSummary.toLowerCase().includes(answerCore.toLowerCase())
+      : strongWords.some((word) => normalizedSummary.toLowerCase().includes(word));
+
+    if (!hasLetter && !hasWord) {
+      return true;
+    }
+  }
+
+  if (!hasPdrReference(normalizedSummary)) {
     return true;
   }
 
@@ -412,18 +523,25 @@ async function generateAlternativeAiText(
 export async function summarizeExplanation(
   apiKey: string | undefined,
   explanation: string,
+  context?: ExplanationSummaryContext,
 ): Promise<string> {
+  const correctAnswer = getCorrectAnswerLabel(context);
+  const contextBlock = buildExplanationContextBlock(context, correctAnswer);
   const prompt = `Ти — помічник з підготовки до іспиту з ПДР України. Скороти це пояснення до короткого тексту (3-5 речень). Обов'язково збережи:
 - Яка правильна відповідь і чому
 - Посилання на конкретні пункти ПДР (якщо є)
 
+Формат обов'язковий:
+- Перше речення почни як: "Правильна відповідь: ..."
+- Якщо в джерелі немає конкретного пункту ПДР, прямо напиши: "У джерелі не вказано конкретний пункт ПДР."
+
 Не додавай вступних фраз типу "Це питання стосується...". Одразу переходь до суті. Пиши українською.
 
 Пояснення:
-${explanation}`;
+${explanation}${contextBlock}`;
 
   const result = await generateAiText(apiKey, prompt, { maxTokens: 350, temperature: 0.2 });
-  if (result && !isWeakExplanationSummary(result, explanation)) {
+  if (result && !isWeakExplanationSummary(result, explanation, correctAnswer)) {
     return result;
   }
 
@@ -431,7 +549,7 @@ ${explanation}`;
     console.warn("AI explanation summary rejected as incomplete, using deterministic fallback");
   }
 
-  const fallbackSummary = buildFallbackExplanationSummary(explanation);
+  const fallbackSummary = buildFallbackExplanationSummary(explanation, correctAnswer);
   return fallbackSummary || explanation;
 }
 
