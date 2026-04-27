@@ -62,7 +62,7 @@ function ensureSentence(text: string): string {
 }
 
 function hasPdrReference(text: string): boolean {
-  return /\b(п\.?\s*\d+(?:\.\d+)*|пункт(ом|у)?|пдр|у джерелі не вказано конкретний пункт пдр)\b/iu.test(text);
+  return /\b(п\.?\s*\d+(?:\.\d+)*|пункт(ом|у)?|пдр)\b/iu.test(text);
 }
 
 function formatAnswerOption(index: number, answer: string): string {
@@ -119,12 +119,9 @@ function buildFallbackExplanationSummary(explanation: string, correctAnswer?: st
   const sentences = splitIntoSentences(paragraphs.join(" "));
   if (sentences.length === 0) {
     const base = normalizeWhitespace(explanation);
-    const withAnswer = correctAnswer
+    return correctAnswer
       ? `${ensureSentence(`Правильна відповідь: ${correctAnswer}`)} ${base}`.trim()
       : base;
-    return hasPdrReference(withAnswer)
-      ? withAnswer
-      : `${withAnswer} У джерелі не вказано конкретний пункт ПДР.`.trim();
   }
 
   const selected: string[] = [];
@@ -156,12 +153,9 @@ function buildFallbackExplanationSummary(explanation: string, correctAnswer?: st
   }
 
   const baseSummary = selected.slice(0, 3).join(" ").trim();
-  const withAnswer = correctAnswer
+  const summary = correctAnswer
     ? `${ensureSentence(`Правильна відповідь: ${correctAnswer}`)} ${baseSummary}`.trim()
     : baseSummary;
-  const summary = hasPdrReference(withAnswer)
-    ? withAnswer
-    : `${withAnswer} У джерелі не вказано конкретний пункт ПДР.`.trim();
 
   if (summary.length <= 650) {
     return summary;
@@ -232,7 +226,7 @@ function isWeakExplanationSummary(summary: string, explanation: string, correctA
     }
   }
 
-  if (!hasPdrReference(normalizedSummary)) {
+  if (hasPdrReference(normalizedExplanation) && !hasPdrReference(normalizedSummary)) {
     return true;
   }
 
@@ -533,7 +527,6 @@ export async function summarizeExplanation(
 
 Формат обов'язковий:
 - Перше речення почни як: "Правильна відповідь: ..."
-- Якщо в джерелі немає конкретного пункту ПДР, прямо напиши: "У джерелі не вказано конкретний пункт ПДР."
 
 Не додавай вступних фраз типу "Це питання стосується...". Одразу переходь до суті. Пиши українською.
 
