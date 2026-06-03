@@ -20,6 +20,7 @@ RUN npm ci --omit=dev
 
 COPY --from=builder /app/dist/ ./dist/
 COPY assets/ ./assets/
+COPY pdr-bank.json ./pdr-bank.json
 
 ENV NODE_ENV=production
 ENV STATE_DIR=/data

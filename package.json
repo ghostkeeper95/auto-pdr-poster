@@ -12,7 +12,8 @@
     "dev": "tsx src/bot.ts",
     "post": "QUESTIONS_PER_RUN=1 tsx src/index.ts",
     "post:5": "QUESTIONS_PER_RUN=5 tsx src/index.ts",
-    "bot": "tsx src/bot.ts"
+    "bot": "tsx src/bot.ts",
+    "dump-bank": "tsx src/dump-bank.ts"
   },
   "keywords": [
     "pdr",
@@ -32,6 +33,7 @@
   },
   "devDependencies": {
     "@types/node": "^20.17.12",
+    "playwright": "^1.60.0",
     "tsx": "^4.19.2",
     "typescript": "^5.7.3"
   }

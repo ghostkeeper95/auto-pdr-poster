@@ -58,7 +58,14 @@ export async function postQuestions(count: number, externalOffset?: number): Pro
     const sectionId =
       availableSections[Math.floor(Math.random() * availableSections.length)];
     console.log(`Fetching section ${sectionId}...`);
-    const questions = await fetchSectionQuestions(sectionId);
+    let questions;
+    try {
+      questions = await fetchSectionQuestions(sectionId);
+    } catch (err) {
+      console.warn(`Skipping section ${sectionId}: ${(err as Error).message}`);
+      exhaustedSections.add(sectionId);
+      continue;
+    }
     const unposted = questions.filter((q) => !isPosted(q.id));
 
     if (unposted.length === 0) {

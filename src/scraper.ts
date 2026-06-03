@@ -1,4 +1,10 @@
 import * as cheerio from "cheerio";
+import {
+  getBankedExplanation,
+  getBankedSection,
+  setBankedExplanation,
+  setBankedSection,
+} from "./bank.js";
 
 export interface Answer {
   answer: string;
@@ -29,6 +35,70 @@ const BASE_URL = "https://pdrtest.com";
 const IMAGE_BASE_URL = "https://bucket.pdrtest.com/pics";
 const GREEN_WAY_BASE_URL = "https://green-way.com.ua";
 const GREEN_WAY_API_URL = "https://api.green-way.com.ua/";
+
+const PDR_BROWSER_HEADERS: Record<string, string> = {
+  "User-Agent":
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36",
+  "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+  "Accept-Language": "uk-UA,uk;q=0.9,en;q=0.8",
+  "Cache-Control": "no-cache",
+  "Pragma": "no-cache",
+  "Sec-Fetch-Dest": "document",
+  "Sec-Fetch-Mode": "navigate",
+  "Sec-Fetch-Site": "same-origin",
+  "Sec-Fetch-User": "?1",
+  "Upgrade-Insecure-Requests": "1",
+};
+
+const pdrCookieJar = new Map<string, string>();
+
+function buildCookieHeader(): string | undefined {
+  if (pdrCookieJar.size === 0) return undefined;
+  return Array.from(pdrCookieJar.entries()).map(([k, v]) => `${k}=${v}`).join("; ");
+}
+
+function rememberCookiesFromResponse(response: Response): void {
+  const setCookie = (response.headers as Headers & { getSetCookie?: () => string[] }).getSetCookie?.();
+  const cookies = setCookie ?? (() => {
+    const single = response.headers.get("set-cookie");
+    return single ? [single] : [];
+  })();
+
+  for (const raw of cookies) {
+    const [pair] = raw.split(";");
+    if (!pair) continue;
+    const eqIdx = pair.indexOf("=");
+    if (eqIdx <= 0) continue;
+    const name = pair.slice(0, eqIdx).trim();
+    const value = pair.slice(eqIdx + 1).trim();
+    if (name) pdrCookieJar.set(name, value);
+  }
+}
+
+function isChallengeResponse(response: Response): boolean {
+  return response.headers.get("x-vercel-mitigated") === "challenge"
+    || response.headers.has("x-vercel-challenge-token");
+}
+
+async function fetchPdr(url: string, attempt = 0): Promise<Response> {
+  const headers: Record<string, string> = { ...PDR_BROWSER_HEADERS, Referer: `${BASE_URL}/` };
+  const cookie = buildCookieHeader();
+  if (cookie) headers.Cookie = cookie;
+
+  const response = await fetch(url, { headers, redirect: "follow" });
+  rememberCookiesFromResponse(response);
+
+  const transient = response.status === 429 || response.status >= 500 || isChallengeResponse(response);
+  if (transient && attempt < 3) {
+    const delayMs = 800 * Math.pow(2, attempt) + Math.floor(Math.random() * 400);
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+    return fetchPdr(url, attempt + 1);
+  }
+
+  return response;
+}
+
+const sectionQuestionsCache = new Map<number, Question[]>();
 
 const GREEN_WAY_ROZDIL_BY_PDR_SECTION: Record<string, number> = {
   "33.1": 34,
@@ -279,15 +349,27 @@ export async function fetchRoadSignTheorySection(section: string): Promise<RoadS
 export async function fetchSectionQuestions(
   sectionId: number,
 ): Promise<Question[]> {
-  const url = `${BASE_URL}/questions/${sectionId}`;
-  const response = await fetch(url);
+  const banked = getBankedSection(sectionId);
+  if (banked) return banked;
 
-  if (!response.ok) {
-    throw new Error(`Failed to fetch section ${sectionId}: ${response.status}`);
+  const cached = sectionQuestionsCache.get(sectionId);
+  if (cached) return cached;
+
+  const url = `${BASE_URL}/questions/${sectionId}`;
+  const response = await fetchPdr(url);
+
+  if (!response.ok || isChallengeResponse(response)) {
+    const reason = isChallengeResponse(response) ? "bot-challenge" : String(response.status);
+    throw new Error(`Failed to fetch section ${sectionId}: ${reason}`);
   }
 
   const html = await response.text();
-  return parseQuestions(html, sectionId);
+  const parsed = parseQuestions(html, sectionId);
+  if (parsed.length > 0) {
+    sectionQuestionsCache.set(sectionId, parsed);
+    setBankedSection(sectionId, parsed);
+  }
+  return parsed;
 }
 
 function parseQuestions(html: string, sectionId: number): Question[] {
@@ -354,11 +436,15 @@ function extractImageMap(html: string): Map<string, string> {
 export async function fetchQuestionExplanation(
   questionId: string,
 ): Promise<string | undefined> {
-  const url = `${BASE_URL}/question/${questionId}`;
-  const response = await fetch(url);
+  const banked = getBankedExplanation(questionId);
+  if (banked) return banked;
 
-  if (!response.ok) {
-    console.warn(`Failed to fetch question ${questionId}: ${response.status}`);
+  const url = `${BASE_URL}/question/${questionId}`;
+  const response = await fetchPdr(url);
+
+  if (!response.ok || isChallengeResponse(response)) {
+    const reason = isChallengeResponse(response) ? "bot-challenge" : String(response.status);
+    console.warn(`Failed to fetch question ${questionId}: ${reason}`);
     return undefined;
   }
 
@@ -371,5 +457,21 @@ export async function fetchQuestionExplanation(
     if (text) paragraphs.push(text);
   });
 
+  const explanation = paragraphs.length > 0 ? paragraphs.join("\n\n") : undefined;
+  if (explanation) setBankedExplanation(questionId, explanation);
+  return explanation;
+}
+
+export function parseQuestionsHtml(html: string, sectionId: number): Question[] {
+  return parseQuestions(html, sectionId);
+}
+
+export function parseExplanationHtml(html: string, questionId: string): string | undefined {
+  const $ = cheerio.load(html);
+  const paragraphs: string[] = [];
+  $(`[id="body-${questionId}"]`).find("p").each((_i, el) => {
+    const text = $(el).text().trim();
+    if (text) paragraphs.push(text);
+  });
   return paragraphs.length > 0 ? paragraphs.join("\n\n") : undefined;
 }

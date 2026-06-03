@@ -1211,7 +1211,14 @@ async function pickRandomQuestion(): Promise<{ question: Question; explanation?:
     const sectionId = Math.floor(Math.random() * TOTAL_SECTIONS) + 1;
     if (exhaustedSections.has(sectionId)) continue;
 
-    const questions = await fetchSectionQuestions(sectionId);
+    let questions: Question[];
+    try {
+      questions = await fetchSectionQuestions(sectionId);
+    } catch (error) {
+      console.warn(`Skipping section ${sectionId}: ${(error as Error).message}`);
+      exhaustedSections.add(sectionId);
+      continue;
+    }
     const unposted = questions.filter((question) => !isPosted(question.id) && !existingIds.has(question.id));
     if (unposted.length === 0) {
       exhaustedSections.add(sectionId);
