@@ -2,8 +2,10 @@ import * as cheerio from "cheerio";
 import {
   getBankedExplanation,
   getBankedSection,
+  getBankedSignTheory,
   setBankedExplanation,
   setBankedSection,
+  setBankedSignTheory,
 } from "./bank.js";
 
 export interface Answer {
@@ -266,14 +268,25 @@ export async function fetchGreenWayExpertComment(
 }
 
 export async function fetchRoadSignTheorySection(section: string): Promise<RoadSignTheoryItem[]> {
-  const url = `${BASE_URL}/driver/rules/section/${section}`;
-  const response = await fetch(url);
+  const banked = getBankedSignTheory(section);
+  if (banked && banked.length > 0) return banked;
 
-  if (!response.ok) {
-    throw new Error(`Failed to fetch rules section ${section}: ${response.status}`);
+  const url = `${BASE_URL}/driver/rules/section/${section}`;
+  const response = await fetchPdr(url);
+
+  if (!response.ok || isChallengeResponse(response)) {
+    const reason = isChallengeResponse(response) ? "bot-challenge" : String(response.status);
+    throw new Error(`Failed to fetch rules section ${section}: ${reason}`);
   }
 
   const html = await response.text();
+  const items = parseRoadSignTheoryHtml(html, section);
+  if (items.length > 0) setBankedSignTheory(section, items);
+  return items;
+}
+
+export function parseRoadSignTheoryHtml(html: string, section: string): RoadSignTheoryItem[] {
+  const url = `${BASE_URL}/driver/rules/section/${section}`;
   const $ = cheerio.load(html);
   const items: RoadSignTheoryItem[] = [];
 

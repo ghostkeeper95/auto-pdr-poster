@@ -1,7 +1,7 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { Question } from "./scraper.js";
+import type { Question, RoadSignTheoryItem } from "./scraper.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 // Bank is bundled with the app (static data). Allow override via PDR_BANK_PATH for the
@@ -14,6 +14,7 @@ const BANK_DIR = dirname(BANK_PATH);
 interface BankFile {
   sections: Record<string, Question[]>;
   explanations: Record<string, string>;
+  signTheory?: Record<string, RoadSignTheoryItem[]>;
   updatedAt?: string;
 }
 
@@ -22,7 +23,7 @@ let cache: BankFile | undefined;
 function loadBank(): BankFile {
   if (cache) return cache;
   if (!existsSync(BANK_PATH)) {
-    cache = { sections: {}, explanations: {} };
+    cache = { sections: {}, explanations: {}, signTheory: {} };
     return cache;
   }
 
@@ -32,11 +33,12 @@ function loadBank(): BankFile {
     cache = {
       sections: parsed.sections ?? {},
       explanations: parsed.explanations ?? {},
+      signTheory: parsed.signTheory ?? {},
       updatedAt: parsed.updatedAt,
     };
   } catch (error) {
     console.warn(`Failed to read PDR bank at ${BANK_PATH}:`, (error as Error).message);
-    cache = { sections: {}, explanations: {} };
+    cache = { sections: {}, explanations: {}, signTheory: {} };
   }
 
   return cache;
@@ -74,14 +76,35 @@ export function setBankedExplanation(questionId: string, explanation: string): v
   persist();
 }
 
-export function getBankStats(): { sections: number; questions: number; explanations: number; path: string } {
+export function getBankStats(): { sections: number; questions: number; explanations: number; signTheorySections: number; signTheoryItems: number; path: string } {
   const bank = loadBank();
   const sectionIds = Object.keys(bank.sections);
   const questions = sectionIds.reduce((sum, id) => sum + bank.sections[id]!.length, 0);
+  const signTheorySectionIds = Object.keys(bank.signTheory ?? {});
+  const signTheoryItems = signTheorySectionIds.reduce(
+    (sum, id) => sum + (bank.signTheory?.[id]?.length ?? 0),
+    0,
+  );
   return {
     sections: sectionIds.length,
     questions,
     explanations: Object.keys(bank.explanations).length,
+    signTheorySections: signTheorySectionIds.length,
+    signTheoryItems,
     path: BANK_PATH,
   };
+}
+
+export function getBankedSignTheory(section: string): RoadSignTheoryItem[] | undefined {
+  const bank = loadBank();
+  const stored = bank.signTheory?.[section];
+  return stored && stored.length > 0 ? stored : undefined;
+}
+
+export function setBankedSignTheory(section: string, items: RoadSignTheoryItem[]): void {
+  if (items.length === 0) return;
+  const bank = loadBank();
+  if (!bank.signTheory) bank.signTheory = {};
+  bank.signTheory[section] = items;
+  persist();
 }

@@ -1,9 +1,10 @@
 import "dotenv/config";
-import { setBankedSection, setBankedExplanation, getBankStats } from "./bank.js";
-import { parseQuestionsHtml, parseExplanationHtml } from "./scraper.js";
+import { setBankedSection, setBankedExplanation, setBankedSignTheory, getBankStats } from "./bank.js";
+import { parseQuestionsHtml, parseExplanationHtml, parseRoadSignTheoryHtml } from "./scraper.js";
 
 const TOTAL_SECTIONS = 71;
 const BASE_URL = "https://pdrtest.com";
+const ROAD_SIGN_THEORY_SECTIONS = ["33.1", "33.2", "33.3", "33.4", "33.5", "33.6", "33.7"] as const;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -55,14 +56,26 @@ async function gotoWithRetry(
 
 interface CliOptions {
   withExplanations: boolean;
+  withSignTheory: boolean;
+  questionsOnly: boolean;
+  signTheoryOnly: boolean;
   sections?: number[];
   headed: boolean;
 }
 
 function parseArgs(argv: string[]): CliOptions {
-  const options: CliOptions = { withExplanations: true, headed: false };
+  const options: CliOptions = {
+    withExplanations: true,
+    withSignTheory: true,
+    questionsOnly: false,
+    signTheoryOnly: false,
+    headed: false,
+  };
   for (const arg of argv) {
     if (arg === "--no-explanations") options.withExplanations = false;
+    else if (arg === "--no-sign-theory") options.withSignTheory = false;
+    else if (arg === "--questions-only") options.questionsOnly = true;
+    else if (arg === "--sign-theory-only") options.signTheoryOnly = true;
     else if (arg === "--headed") options.headed = true;
     else if (arg.startsWith("--sections=")) {
       options.sections = arg
@@ -105,7 +118,11 @@ async function main(): Promise<void> {
 
   const sectionIds = options.sections ?? Array.from({ length: TOTAL_SECTIONS }, (_, i) => i + 1);
 
-  for (const sectionId of sectionIds) {
+  const shouldDumpQuestions = !options.signTheoryOnly;
+  const shouldDumpSignTheory = !options.questionsOnly && options.withSignTheory;
+
+  if (shouldDumpQuestions) {
+    for (const sectionId of sectionIds) {
     const url = `${BASE_URL}/questions/${sectionId}`;
     try {
       const response = await gotoWithRetry(page, url);
@@ -143,12 +160,37 @@ async function main(): Promise<void> {
       console.warn(`Section ${sectionId}: ${(error as Error).message}`);
     }
     await sleep(800);
+    }
+  }
+
+  if (shouldDumpSignTheory) {
+    for (const theorySection of ROAD_SIGN_THEORY_SECTIONS) {
+      const url = `${BASE_URL}/driver/rules/section/${theorySection}`;
+      try {
+        const response = await gotoWithRetry(page, url);
+        if (!response || !response.ok()) {
+          console.warn(`Sign theory ${theorySection}: HTTP ${response?.status() ?? "no-response"}, skipping`);
+          continue;
+        }
+        const html = await page.content();
+        const items = parseRoadSignTheoryHtml(html, theorySection);
+        if (items.length === 0) {
+          console.warn(`Sign theory ${theorySection}: parsed 0 items, skipping`);
+          continue;
+        }
+        setBankedSignTheory(theorySection, items);
+        console.log(`Sign theory ${theorySection}: saved ${items.length} items`);
+      } catch (error) {
+        console.warn(`Sign theory ${theorySection}: ${(error as Error).message}`);
+      }
+      await sleep(800);
+    }
   }
 
   await browser.close();
   const stats = getBankStats();
   console.log(
-    `Done. Bank now has ${stats.questions} questions across ${stats.sections} sections, ${stats.explanations} explanations. File: ${stats.path}`,
+    `Done. Bank now has ${stats.questions} questions across ${stats.sections} sections, ${stats.explanations} explanations, ${stats.signTheoryItems} sign theory items across ${stats.signTheorySections} sign sections. File: ${stats.path}`,
   );
 }
 
